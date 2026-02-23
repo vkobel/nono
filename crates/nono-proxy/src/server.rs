@@ -326,7 +326,7 @@ mod tests {
         let vars = handle.env_vars();
         let http_proxy = vars.iter().find(|(k, _)| k == "HTTP_PROXY");
         assert!(http_proxy.is_some());
-        assert!(http_proxy.unwrap().1.starts_with("http://127.0.0.1:"));
+        assert!(http_proxy.unwrap().1.starts_with("http://nono:"));
 
         let token_var = vars.iter().find(|(k, _)| k == "NONO_PROXY_TOKEN");
         assert!(token_var.is_some());
