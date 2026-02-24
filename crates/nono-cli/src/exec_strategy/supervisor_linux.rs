@@ -245,39 +245,41 @@ pub(super) fn handle_seccomp_notification(
     // 7. Trust verification for instruction files (TOCTOU protection)
     // If the path is an instruction file, verify it and stash the digest
     // for re-verification at open time. Failed verification results in early denial.
-    let verified_digest: Option<String> =
-        if let Some(trust_result) = trust_interceptor.and_then(|ti| ti.check_path(&path)) {
-            match trust_result {
-                Ok(verified) => {
-                    debug!(
-                        "Seccomp: instruction file {} verified (publisher: {})",
-                        path.display(),
-                        verified.publisher,
-                    );
-                    Some(verified.digest)
-                }
-                Err(reason) => {
-                    // Instruction file failed trust verification — auto-deny
-                    debug!(
-                        "Seccomp: instruction file {} failed trust verification: {}",
-                        path.display(),
-                        reason
-                    );
-                    record_denial(
-                        denials,
-                        DenialRecord {
-                            path: path.clone(),
-                            access,
-                            reason: DenialReason::PolicyBlocked,
-                        },
-                    );
-                    let _ = deny_notif(notify_fd, notif.id);
-                    return Ok(());
-                }
+    let verified_digest: Option<String> = if let Some(trust_result) = trust_interceptor
+        .as_mut()
+        .and_then(|ti| ti.check_path(&path))
+    {
+        match trust_result {
+            Ok(verified) => {
+                debug!(
+                    "Seccomp: instruction file {} verified (publisher: {})",
+                    path.display(),
+                    verified.publisher,
+                );
+                Some(verified.digest)
             }
-        } else {
-            None
-        };
+            Err(reason) => {
+                // Instruction file failed trust verification — auto-deny
+                debug!(
+                    "Seccomp: instruction file {} failed trust verification: {}",
+                    path.display(),
+                    reason
+                );
+                record_denial(
+                    denials,
+                    DenialRecord {
+                        path: path.clone(),
+                        access,
+                        reason: DenialReason::PolicyBlocked,
+                    },
+                );
+                let _ = deny_notif(notify_fd, notif.id);
+                return Ok(());
+            }
+        }
+    } else {
+        None
+    };
 
     // 8. Delegate to approval backend (for both instruction and non-instruction files)
     let request = nono::supervisor::CapabilityRequest {
