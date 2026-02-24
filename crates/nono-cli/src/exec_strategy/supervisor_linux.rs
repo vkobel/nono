@@ -96,7 +96,7 @@ pub(super) fn handle_seccomp_notification(
     initial_caps: &[(std::path::PathBuf, bool)],
     rate_limiter: &mut RateLimiter,
     denials: &mut Vec<DenialRecord>,
-    trust_interceptor: Option<&mut TrustInterceptor>,
+    mut trust_interceptor: Option<&mut TrustInterceptor>,
 ) -> Result<()> {
     use nono::sandbox::{
         classify_access_from_flags, deny_notif, inject_fd, notif_id_valid, read_notif_path,
