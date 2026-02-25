@@ -257,12 +257,11 @@ fn validate_phantom_token(
             let value = line.split_once(':').map(|(_, v)| v.trim()).unwrap_or("");
 
             // Handle "Bearer <token>" format (strip "Bearer " prefix if present)
-            let token_value = if lower.contains("bearer ") {
-                value
-                    .strip_prefix("Bearer ")
-                    .or_else(|| value.strip_prefix("bearer "))
-                    .unwrap_or(value)
-                    .trim()
+            // Use case-insensitive check, then slice original value by length
+            let value_lower = value.to_lowercase();
+            let token_value = if value_lower.starts_with("bearer ") {
+                // "bearer ".len() == 7
+                value[7..].trim()
             } else {
                 value
             };
