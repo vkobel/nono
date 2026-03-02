@@ -490,7 +490,7 @@
         "allow_file": ["$HOME/.claude.json"],
         "read_file": ["$HOME/Library/Keychains/login.keychain-db", "$HOME/.gitconfig", "$HOME/.gitignore_global", "$HOME/.config/git/ignore"]
       },
-      "network": { "block": false },
+      "network": { "block": false, "network_profile": "developer" },
       "workdir": { "access": "readwrite" },
       "hooks": {
         "claude-code": {
@@ -524,7 +524,7 @@
           "$TMPDIR/openclaw-$UID"
         ]
       },
-      "network": { "block": false },
+      "network": { "block": false, "network_profile": "developer" },
       "workdir": { "access": "read" },
       "undo": {
         "exclude_patterns": ["node_modules", ".next"]
@@ -549,7 +549,7 @@
           "$HOME/.local/share/opencode"
         ]
       },
-      "network": { "block": false },
+      "network": { "block": false, "network_profile": "developer" },
       "workdir": { "access": "readwrite" },
       "undo": {
         "exclude_patterns": ["node_modules", ".next"]
@@ -568,7 +568,7 @@
       },
       "trust_groups": [],
       "filesystem": {},
-      "network": { "block": false },
+      "network": { "block": false, "network_profile": "developer" },
       "workdir": { "access": "readwrite" },
       "interactive": false
     },
@@ -584,7 +584,7 @@
       },
       "trust_groups": [],
       "filesystem": {},
-      "network": { "block": false },
+      "network": { "block": false, "network_profile": "developer" },
       "workdir": { "access": "readwrite" },
       "interactive": false
     },
@@ -600,7 +600,7 @@
       },
       "trust_groups": [],
       "filesystem": {},
-      "network": { "block": false },
+      "network": { "block": false, "network_profile": "developer" },
       "workdir": { "access": "readwrite" },
       "interactive": false
     },
@@ -616,7 +616,7 @@
       },
       "trust_groups": [],
       "filesystem": {},
-      "network": { "block": false },
+      "network": { "block": false, "network_profile": "developer" },
       "workdir": { "access": "readwrite" },
       "interactive": false
     }

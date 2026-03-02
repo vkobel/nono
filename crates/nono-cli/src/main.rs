@@ -650,8 +650,13 @@ fn build_proxy_config_from_flags(
     )?;
     resolved.routes = routes;
 
-    // Build the proxy config with extra hosts from CLI/profile
-    let mut proxy_config = network_policy::build_proxy_config(&resolved, &flags.proxy_allow_hosts);
+    // Expand --proxy-allow entries: group names become their hosts,
+    // literal hostnames pass through as-is.
+    let expanded_proxy_allow =
+        network_policy::expand_proxy_allow(&net_policy, &flags.proxy_allow_hosts);
+
+    // Build the proxy config with expanded extra hosts
+    let mut proxy_config = network_policy::build_proxy_config(&resolved, &expanded_proxy_allow);
 
     // Wire in external proxy if specified
     if let Some(ref addr) = flags.external_proxy {

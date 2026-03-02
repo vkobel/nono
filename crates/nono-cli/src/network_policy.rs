@@ -61,7 +61,10 @@ pub struct NetworkProfileDef {
 #[derive(Debug, Clone, Deserialize)]
 pub struct CredentialDef {
     pub upstream: String,
-    pub credential_key: String,
+    /// Keystore account name. Defaults to the service name (the map key)
+    /// if not specified, so the keychain account matches the credential name.
+    #[serde(default)]
+    pub credential_key: Option<String>,
     #[serde(default = "default_inject_header")]
     pub inject_header: String,
     #[serde(default = "default_credential_format")]
@@ -210,11 +213,13 @@ pub fn resolve_credentials(
                 env_var: cred.env_var.clone(),
             });
         } else if let Some(cred) = policy.credentials.get(name) {
-            // Built-in credentials always use header mode
+            // Built-in credentials always use header mode.
+            // credential_key defaults to the service name if not set.
+            let key = cred.credential_key.clone().unwrap_or_else(|| name.clone());
             routes.push(RouteConfig {
                 prefix: name.clone(),
                 upstream: cred.upstream.clone(),
-                credential_key: Some(cred.credential_key.clone()),
+                credential_key: Some(key),
                 inject_mode: InjectMode::Header,
                 inject_header: cred.inject_header.clone(),
                 credential_format: cred.credential_format.clone(),
@@ -255,6 +260,29 @@ pub fn build_proxy_config(resolved: &ResolvedNetworkPolicy, extra_hosts: &[Strin
     }
 }
 
+/// Expand `--proxy-allow` entries: if an entry matches a group name in the
+/// network policy, expand it to the group's hosts and suffixes. Otherwise
+/// treat it as a literal hostname.
+pub fn expand_proxy_allow(policy: &NetworkPolicy, entries: &[String]) -> Vec<String> {
+    let mut result = Vec::new();
+    for entry in entries {
+        if let Some(group) = policy.groups.get(entry.as_str()) {
+            result.extend(group.hosts.clone());
+            for suffix in &group.suffixes {
+                let wildcard = if suffix.starts_with('.') {
+                    format!("*{}", suffix)
+                } else {
+                    format!("*.{}", suffix)
+                };
+                result.push(wildcard);
+            }
+        } else {
+            result.push(entry.clone());
+        }
+    }
+    result
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -270,10 +298,10 @@ mod tests {
     }
 
     #[test]
-    fn test_resolve_claude_code_profile() {
+    fn test_resolve_developer_profile() {
         let json = embedded_network_policy_json();
         let policy = load_network_policy(json).unwrap();
-        let resolved = resolve_network_profile(&policy, "claude-code").unwrap();
+        let resolved = resolve_network_profile(&policy, "developer").unwrap();
         assert!(!resolved.hosts.is_empty());
         // Should include known LLM API hosts
         assert!(resolved.hosts.contains(&"api.openai.com".to_string()));

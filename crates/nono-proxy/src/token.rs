@@ -7,7 +7,7 @@
 
 use crate::error::{ProxyError, Result};
 use subtle::ConstantTimeEq;
-use tracing::warn;
+use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
 /// Length of the random token in bytes (256 bits of entropy).
@@ -83,7 +83,7 @@ pub fn validate_proxy_auth(header_bytes: &[u8], session_token: &Zeroizing<String
         }
     }
 
-    warn!("Missing Proxy-Authorization header");
+    debug!("Missing Proxy-Authorization header");
     Err(ProxyError::InvalidToken)
 }
 

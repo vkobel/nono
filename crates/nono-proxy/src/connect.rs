@@ -39,8 +39,12 @@ pub async fn handle_connect(
     let (host, port) = parse_connect_target(first_line)?;
     debug!("CONNECT request to {}:{}", host, port);
 
-    // Validate session token from Proxy-Authorization header
-    validate_proxy_auth(remaining_header, session_token)?;
+    // Validate session token from Proxy-Authorization header.
+    // Non-fatal for CONNECT: Node.js undici doesn't send Proxy-Authorization
+    // from URL userinfo for CONNECT requests.
+    if let Err(e) = validate_proxy_auth(remaining_header, session_token) {
+        debug!("CONNECT auth skipped: {}", e);
+    }
 
     // Check host against filter (DNS resolution happens here)
     let check = filter.check_host(&host, port).await?;
