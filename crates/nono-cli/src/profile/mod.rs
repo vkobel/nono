@@ -403,7 +403,7 @@ fn validate_profile_custom_credentials(profile: &Profile) -> Result<()> {
 /// Keyring account names are validated at load time by the keyring crate itself,
 /// but `op://` and `env://` URIs need structural validation upfront.
 fn validate_env_credential_keys(profile: &Profile) -> Result<()> {
-    for key in profile.env_credentials.mappings.keys() {
+    for (key, value) in &profile.env_credentials.mappings {
         if nono::keystore::is_op_uri(key) {
             nono::keystore::validate_op_uri(key).map_err(|e| {
                 NonoError::ProfileParse(format!("invalid 1Password URI in env_credentials: {}", e))
@@ -413,6 +413,13 @@ fn validate_env_credential_keys(profile: &Profile) -> Result<()> {
                 NonoError::ProfileParse(format!("invalid env:// URI in env_credentials: {}", e))
             })?;
         }
+        // Validate destination env var name against dangerous blocklist
+        nono::validate_destination_env_var(value).map_err(|e| {
+            NonoError::ProfileParse(format!(
+                "invalid destination env var '{}' in env_credentials: {}",
+                value, e
+            ))
+        })?;
     }
     Ok(())
 }

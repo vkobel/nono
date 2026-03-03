@@ -255,9 +255,50 @@ pub fn validate_env_uri(uri: &str) -> Result<()> {
         )));
     }
 
-    if DANGEROUS_ENV_VAR_NAMES.contains(&var_name) {
+    if DANGEROUS_ENV_VAR_NAMES
+        .iter()
+        .any(|&d| d.eq_ignore_ascii_case(var_name))
+    {
         return Err(NonoError::ConfigParse(format!(
             "env:// cannot read dangerous environment variable: {}",
+            var_name
+        )));
+    }
+
+    Ok(())
+}
+
+/// Validate a destination environment variable name.
+///
+/// Ensures the target variable name is not on the dangerous blocklist and
+/// follows standard naming conventions (`[A-Za-z0-9_]+`). This prevents
+/// Environment Variable Injection where an attacker specifies a dangerous
+/// target like `LD_PRELOAD` or `PATH` via explicit `=TARGET` syntax.
+///
+/// The check is case-insensitive to prevent bypass via `ld_preload` etc.
+pub fn validate_destination_env_var(var_name: &str) -> Result<()> {
+    if var_name.is_empty() {
+        return Err(NonoError::ConfigParse(
+            "destination environment variable name cannot be empty".to_string(),
+        ));
+    }
+
+    if let Some(bad) = var_name
+        .chars()
+        .find(|c| !c.is_ascii_alphanumeric() && *c != '_')
+    {
+        return Err(NonoError::ConfigParse(format!(
+            "destination environment variable name contains invalid character {:?}: {}",
+            bad, var_name
+        )));
+    }
+
+    if DANGEROUS_ENV_VAR_NAMES
+        .iter()
+        .any(|&d| d.eq_ignore_ascii_case(var_name))
+    {
+        return Err(NonoError::ConfigParse(format!(
+            "destination environment variable '{}' is on the blocklist of dangerous variables",
             var_name
         )));
     }
@@ -542,13 +583,18 @@ pub fn build_mappings_from_list(accounts: &str) -> Result<HashMap<String, String
                 }
 
                 validate_env_uri(uri)?;
+                validate_destination_env_var(var_name)?;
                 mappings.insert(uri.to_string(), var_name.to_string());
             } else {
                 // Auto-derive: env://GITHUB_TOKEN -> target GITHUB_TOKEN
                 validate_env_uri(entry)?;
-                let source_var = entry
-                    .strip_prefix(ENV_URI_PREFIX)
-                    .ok_or_else(|| NonoError::ConfigParse("invalid env:// URI".to_string()))?;
+                // Safe: validate_env_uri confirmed the prefix exists
+                let source_var = match entry.strip_prefix(ENV_URI_PREFIX) {
+                    Some(v) => v,
+                    None => {
+                        return Err(NonoError::ConfigParse("invalid env:// URI".to_string()));
+                    }
+                };
                 mappings.insert(entry.to_string(), source_var.to_string());
             }
         } else if entry.starts_with(OP_URI_PREFIX) {
@@ -569,6 +615,7 @@ pub fn build_mappings_from_list(accounts: &str) -> Result<HashMap<String, String
 
                 // Validate the URI portion
                 validate_op_uri(uri)?;
+                validate_destination_env_var(var_name)?;
 
                 mappings.insert(uri.to_string(), var_name.to_string());
             } else {
@@ -581,6 +628,7 @@ pub fn build_mappings_from_list(accounts: &str) -> Result<HashMap<String, String
         } else {
             // Keyring name: auto-uppercase to env var name
             let env_var = entry.to_uppercase();
+            validate_destination_env_var(&env_var)?;
             mappings.insert(entry.to_string(), env_var);
         }
     }
@@ -1206,5 +1254,95 @@ mod tests {
             mappings.get("env://GITHUB_TOKEN"),
             Some(&"GITHUB_TOKEN".to_string())
         );
+    }
+
+    // =========================================================================
+    // Case-insensitive dangerous env var bypass prevention
+    // =========================================================================
+
+    #[test]
+    fn test_validate_env_uri_dangerous_case_insensitive() {
+        // Lowercase must be caught (case-insensitive check)
+        let err = validate_env_uri("env://ld_preload").expect_err("should reject");
+        assert!(err.to_string().contains("dangerous"), "got: {}", err);
+
+        // Mixed case must be caught
+        let err = validate_env_uri("env://Ld_Preload").expect_err("should reject");
+        assert!(err.to_string().contains("dangerous"), "got: {}", err);
+
+        let err = validate_env_uri("env://path").expect_err("should reject");
+        assert!(err.to_string().contains("dangerous"), "got: {}", err);
+
+        let err = validate_env_uri("env://Node_Options").expect_err("should reject");
+        assert!(err.to_string().contains("dangerous"), "got: {}", err);
+    }
+
+    // =========================================================================
+    // Destination env var validation
+    // =========================================================================
+
+    #[test]
+    fn test_validate_destination_env_var_valid() {
+        assert!(validate_destination_env_var("GITHUB_TOKEN").is_ok());
+        assert!(validate_destination_env_var("MY_API_KEY").is_ok());
+        assert!(validate_destination_env_var("x").is_ok());
+    }
+
+    #[test]
+    fn test_validate_destination_env_var_empty() {
+        let err = validate_destination_env_var("").expect_err("should reject");
+        assert!(err.to_string().contains("empty"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_validate_destination_env_var_invalid_chars() {
+        let err = validate_destination_env_var("MY-VAR").expect_err("should reject");
+        assert!(
+            err.to_string().contains("invalid character"),
+            "got: {}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_validate_destination_env_var_dangerous() {
+        let err = validate_destination_env_var("LD_PRELOAD").expect_err("should reject");
+        assert!(err.to_string().contains("blocklist"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_validate_destination_env_var_dangerous_case_insensitive() {
+        let err = validate_destination_env_var("ld_preload").expect_err("should reject");
+        assert!(err.to_string().contains("blocklist"), "got: {}", err);
+
+        let err = validate_destination_env_var("Path").expect_err("should reject");
+        assert!(err.to_string().contains("blocklist"), "got: {}", err);
+
+        let err = validate_destination_env_var("DYLD_INSERT_LIBRARIES").expect_err("should reject");
+        assert!(err.to_string().contains("blocklist"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_build_mappings_env_uri_explicit_dangerous_target_rejected() {
+        // env://SAFE_VAR=LD_PRELOAD must be rejected
+        let err = build_mappings_from_list("env://SAFE_VAR=LD_PRELOAD")
+            .expect_err("should reject dangerous target");
+        assert!(err.to_string().contains("blocklist"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_build_mappings_op_uri_dangerous_target_rejected() {
+        // op://vault/item/field=PATH must be rejected
+        let err = build_mappings_from_list("op://vault/item/field=PATH")
+            .expect_err("should reject dangerous target");
+        assert!(err.to_string().contains("blocklist"), "got: {}", err);
+    }
+
+    #[test]
+    fn test_build_mappings_keyring_dangerous_autoderived_rejected() {
+        // A keyring name that uppercases to a dangerous var must be rejected
+        let err =
+            build_mappings_from_list("ld_preload").expect_err("should reject dangerous target");
+        assert!(err.to_string().contains("blocklist"), "got: {}", err);
     }
 }

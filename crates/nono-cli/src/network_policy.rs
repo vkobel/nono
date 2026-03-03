@@ -207,6 +207,15 @@ pub fn resolve_credentials(
         // in profile/mod.rs::validate_profile_custom_credentials(), so we don't
         // need to re-validate here.
         if let Some(cred) = custom_credentials.get(name) {
+            // Validate env_var against dangerous variable blocklist
+            if let Some(ref env_var) = cred.env_var {
+                nono::validate_destination_env_var(env_var).map_err(|e| {
+                    NonoError::ConfigParse(format!(
+                        "custom credential '{}' has invalid env_var: {}",
+                        name, e
+                    ))
+                })?;
+            }
             routes.push(RouteConfig {
                 prefix: name.clone(),
                 upstream: cred.upstream.clone(),
@@ -220,6 +229,15 @@ pub fn resolve_credentials(
                 env_var: cred.env_var.clone(),
             });
         } else if let Some(cred) = policy.credentials.get(name) {
+            // Validate env_var against dangerous variable blocklist
+            if let Some(ref env_var) = cred.env_var {
+                nono::validate_destination_env_var(env_var).map_err(|e| {
+                    NonoError::ConfigParse(format!(
+                        "credential '{}' has invalid env_var: {}",
+                        name, e
+                    ))
+                })?;
+            }
             // Built-in credentials always use header mode.
             // credential_key defaults to the service name if not set.
             let key = cred.credential_key.clone().unwrap_or_else(|| name.clone());
@@ -743,6 +761,39 @@ mod tests {
             resolved.profile_credentials.contains(&"github".to_string()),
             "claude-code profile should include github credential, got: {:?}",
             resolved.profile_credentials
+        );
+    }
+
+    #[test]
+    fn test_resolve_credentials_rejects_dangerous_env_var() {
+        use crate::profile::CustomCredentialDef;
+
+        let json = embedded_network_policy_json();
+        let policy = load_network_policy(json).unwrap();
+
+        let mut custom = HashMap::new();
+        custom.insert(
+            "evil".to_string(),
+            CustomCredentialDef {
+                upstream: "https://api.example.com".to_string(),
+                credential_key: "safe_key".to_string(),
+                inject_mode: InjectMode::Header,
+                inject_header: "Authorization".to_string(),
+                credential_format: "Bearer {}".to_string(),
+                path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
+                env_var: Some("LD_PRELOAD".to_string()),
+            },
+        );
+
+        let result = resolve_credentials(&policy, &["evil".to_string()], &custom);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("blocklist"),
+            "should mention blocklist, got: {}",
+            err
         );
     }
 
