@@ -131,11 +131,24 @@ User profiles can specify a network profile in the `network` section:
 
 The following cloud metadata destinations are always blocked, regardless of configuration. These cannot be overridden.
 
+### Denied Hostnames
+
 | Host | Service |
 |------|---------|
 | 169.254.169.254 | AWS/GCP/Azure instance metadata |
 | metadata.google.internal | GCP metadata alias |
 | metadata.azure.internal | Azure metadata alias |
+
+### Link-Local IP Protection
+
+Resolved IPs in the link-local range are always blocked after DNS resolution to prevent DNS rebinding attacks targeting cloud metadata services:
+
+| Range | Description |
+|-------|-------------|
+| 169.254.0.0/16 | IPv4 link-local |
+| fe80::/10 | IPv6 link-local |
+
+Private network addresses (RFC1918: 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16) are allowed to support enterprise environments.
 
 ## Platform Behavior
 

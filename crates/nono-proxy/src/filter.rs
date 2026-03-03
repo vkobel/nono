@@ -1,11 +1,12 @@
 //! Async host filtering wrapping the library's [`HostFilter`](nono::HostFilter).
 //!
-//! Performs DNS resolution via `tokio::net::lookup_host()` and checks
-//! the hostname against the cloud metadata deny list and allowlist.
+//! Performs DNS resolution via `tokio::net::lookup_host()`, checks resolved
+//! IPs against the link-local range (cloud metadata SSRF protection), and
+//! validates the hostname against the cloud metadata deny list and allowlist.
 
 use crate::error::Result;
 use nono::net_filter::{FilterResult, HostFilter};
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use tracing::debug;
 
 /// Result of a filter check including resolved socket addresses.
@@ -45,44 +46,47 @@ impl ProxyFilter {
 
     /// Check a host against the filter with async DNS resolution.
     ///
-    /// Resolves the hostname to IP addresses, checks the hostname against
-    /// the cloud metadata deny list and allowlist.
+    /// Resolves the hostname to IP addresses, then checks all resolved IPs
+    /// against the link-local deny range (cloud metadata SSRF protection).
+    /// If any resolved IP is link-local, the request is blocked.
     ///
     /// On success, returns both the filter result and the resolved socket
     /// addresses. Callers MUST use `resolved_addrs` to connect to the upstream
     /// instead of re-resolving the hostname, eliminating the DNS rebinding
     /// TOCTOU window.
     pub async fn check_host(&self, host: &str, port: u16) -> Result<CheckResult> {
-        // Check hostname against deny list and allowlist first
-        let result = self.inner.check_host(host);
-
-        if !result.is_allowed() {
-            return Ok(CheckResult {
-                result,
-                resolved_addrs: Vec::new(),
-            });
-        }
-
-        // Resolve DNS only for allowed hosts
+        // Resolve DNS
         let addr_str = format!("{}:{}", host, port);
         let resolved: Vec<SocketAddr> = match tokio::net::lookup_host(&addr_str).await {
             Ok(addrs) => addrs.collect(),
             Err(e) => {
                 debug!("DNS resolution failed for {}: {}", host, e);
+                // If DNS fails, we still check the hostname against deny list
+                // (cloud metadata hostnames don't need DNS resolution to be blocked)
                 Vec::new()
             }
         };
 
+        let resolved_ips: Vec<IpAddr> = resolved.iter().map(|a| a.ip()).collect();
+        let result = self.inner.check_host(host, &resolved_ips);
+
+        // Only return resolved addrs on allow to prevent misuse
+        let addrs = if result.is_allowed() {
+            resolved
+        } else {
+            Vec::new()
+        };
+
         Ok(CheckResult {
             result,
-            resolved_addrs: resolved,
+            resolved_addrs: addrs,
         })
     }
 
-    /// Check a host synchronously (no DNS lookup).
+    /// Check a host with pre-resolved IPs (no DNS lookup).
     #[must_use]
-    pub fn check_host_sync(&self, host: &str) -> FilterResult {
-        self.inner.check_host(host)
+    pub fn check_host_with_ips(&self, host: &str, resolved_ips: &[IpAddr]) -> FilterResult {
+        self.inner.check_host(host, resolved_ips)
     }
 
     /// Number of allowed hosts configured.
@@ -96,29 +100,41 @@ impl ProxyFilter {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::net::Ipv4Addr;
 
     #[test]
     fn test_proxy_filter_delegates_to_host_filter() {
         let filter = ProxyFilter::new(&["api.openai.com".to_string()]);
+        let public_ip = vec![IpAddr::V4(Ipv4Addr::new(104, 18, 7, 96))];
 
-        let result = filter.check_host_sync("api.openai.com");
+        let result = filter.check_host_with_ips("api.openai.com", &public_ip);
         assert!(result.is_allowed());
 
-        let result = filter.check_host_sync("evil.com");
+        let result = filter.check_host_with_ips("evil.com", &public_ip);
         assert!(!result.is_allowed());
     }
 
     #[test]
     fn test_proxy_filter_allow_all() {
         let filter = ProxyFilter::allow_all();
-        let result = filter.check_host_sync("anything.com");
+        let public_ip = vec![IpAddr::V4(Ipv4Addr::new(104, 18, 7, 96))];
+        let result = filter.check_host_with_ips("anything.com", &public_ip);
         assert!(result.is_allowed());
     }
 
     #[test]
     fn test_proxy_filter_allows_private_networks() {
         let filter = ProxyFilter::allow_all();
-        let result = filter.check_host_sync("corp.internal");
+        let private_ip = vec![IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))];
+        let result = filter.check_host_with_ips("corp.internal", &private_ip);
         assert!(result.is_allowed());
+    }
+
+    #[test]
+    fn test_proxy_filter_denies_link_local() {
+        let filter = ProxyFilter::allow_all();
+        let link_local = vec![IpAddr::V4(Ipv4Addr::new(169, 254, 169, 254))];
+        let result = filter.check_host_with_ips("evil.com", &link_local);
+        assert!(!result.is_allowed());
     }
 }

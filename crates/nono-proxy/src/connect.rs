@@ -52,7 +52,8 @@ pub async fn handle_connect(
     }
 
     // Connect to the resolved IP directly — NOT re-resolving the hostname.
-    // This eliminates the DNS rebinding TOCTOU window.
+    // This eliminates the DNS rebinding TOCTOU: the IPs were already checked
+    // against the link-local range in check_host() above.
     let resolved = &check.resolved_addrs;
     if resolved.is_empty() {
         let reason = "DNS resolution returned no addresses".to_string();

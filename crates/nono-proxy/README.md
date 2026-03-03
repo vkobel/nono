@@ -16,8 +16,8 @@ Network filtering proxy for the [nono](https://crates.io/crates/nono) sandbox.
 
 ## Security Properties
 
-- **Cloud metadata deny list is hardcoded** -- Cloud metadata endpoints (169.254.169.254, metadata.google.internal, metadata.azure.internal) are always blocked regardless of allowlist configuration. Private network addresses (RFC1918) are allowed to support enterprise environments.
-- **DNS rebinding protection** -- The proxy resolves DNS and connects to resolved addresses, not re-resolved hostnames.
+- **Cloud metadata deny list is hardcoded** -- Cloud metadata hostnames (169.254.169.254, metadata.google.internal, metadata.azure.internal) are always blocked regardless of allowlist configuration. Private network addresses (RFC1918) are allowed to support enterprise environments.
+- **DNS rebinding protection** -- The proxy resolves DNS, checks all resolved IPs against the link-local range (169.254.0.0/16, fe80::/10), and connects to resolved addresses (not re-resolved hostnames). This prevents DNS rebinding attacks targeting cloud metadata.
 - **Session token authentication** -- Each session generates a 256-bit random token. CONNECT requests use `Proxy-Authorization` (Basic or Bearer); reverse proxy requests use `X-Nono-Token`.
 - **Credential isolation** -- API keys are loaded from the OS keyring, stored in `Zeroizing<String>`, injected at the HTTP header level, and never exposed to the sandboxed process.
 - **Constant-time token comparison** -- Prevents timing side-channel attacks on session token validation.
