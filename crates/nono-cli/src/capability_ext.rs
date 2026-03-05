@@ -270,6 +270,16 @@ impl CapabilitySetExt for CapabilitySet {
             caps.add_allowed_command(cmd.as_str());
         }
 
+        // Apply signal mode from profile (None defaults to Isolated)
+        caps = match profile.security.signal_mode {
+            Some(crate::profile::ProfileSignalMode::AllowAll) => {
+                caps.set_signal_mode(nono::SignalMode::AllowAll)
+            }
+            Some(crate::profile::ProfileSignalMode::Isolated) | None => {
+                caps.set_signal_mode(nono::SignalMode::Isolated)
+            }
+        };
+
         // Apply CLI overrides (CLI args take precedence)
         add_cli_overrides(&mut caps, args)?;
 
