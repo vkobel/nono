@@ -1787,15 +1787,16 @@ mod tests {
     }
 
     #[test]
-    fn test_learn_result_to_json() {
+    fn test_learn_result_to_json() -> Result<()> {
         let mut result = LearnResult::new();
         result.read_paths.insert(PathBuf::from("/some/read/path"));
         result.write_paths.insert(PathBuf::from("/some/write/path"));
 
-        let json = result.to_json();
+        let json = result.to_json()?;
         assert!(json.contains("filesystem"));
         assert!(json.contains("/some/read/path"));
         assert!(json.contains("/some/write/path"));
+        Ok(())
     }
 
     #[test]
@@ -1982,7 +1983,7 @@ mod tests {
     }
 
     #[test]
-    fn test_learn_result_network_json() {
+    fn test_learn_result_network_json() -> Result<()> {
         let mut result = LearnResult::new();
         result.outbound_connections.push(NetworkConnectionSummary {
             endpoint: NetworkEndpoint {
@@ -2001,7 +2002,7 @@ mod tests {
             count: 1,
         });
 
-        let json = result.to_json();
+        let json = result.to_json()?;
         assert!(json.contains("\"network\""));
         assert!(json.contains("\"outbound\""));
         assert!(json.contains("\"listening\""));
@@ -2010,6 +2011,7 @@ mod tests {
         assert!(json.contains("example.com"));
         assert!(json.contains("0.0.0.0"));
         assert!(json.contains("3000"));
+        Ok(())
     }
 
     #[test]
@@ -2033,9 +2035,9 @@ mod tests {
         });
 
         let summary = result.to_summary();
-        assert!(summary.contains("Outbound connections:"));
+        assert!(summary.contains("OUTBOUND NETWORK"));
         assert!(summary.contains("example.com (93.184.216.34):443 (12x)"));
-        assert!(summary.contains("Listening ports:"));
+        assert!(summary.contains("LISTENING PORTS"));
         assert!(summary.contains("0.0.0.0:3000"));
         // Count of 1 should NOT show "(1x)"
         assert!(!summary.contains("(1x)"));
