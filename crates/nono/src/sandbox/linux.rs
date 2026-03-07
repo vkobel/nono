@@ -675,9 +675,12 @@ pub fn resolve_notif_path(
         return Ok(raw_path.to_path_buf());
     }
 
-    // AT_FDCWD (-100 as i32, but stored as u64 in seccomp args via sign extension)
+    // AT_FDCWD (-100, but stored as u64 in seccomp args via sign extension).
+    // Two representations: 32-bit zero-extended (0xFFFFFF9C) and 64-bit sign-extended
+    // (0xFFFFFFFFFFFFFF9C). We must check both.
+    #[allow(clippy::unnecessary_cast)]
     let at_fdcwd_u64 = libc::AT_FDCWD as i32 as u32 as u64;
-    // Also handle sign-extended 64-bit representation
+    #[allow(clippy::unnecessary_cast)]
     let at_fdcwd_u64_extended = libc::AT_FDCWD as i64 as u64;
 
     let base_dir = if dirfd == at_fdcwd_u64 || dirfd == at_fdcwd_u64_extended {
@@ -1115,6 +1118,7 @@ mod tests {
         // sign-extended to 0xFFFFFFFFFFFFFF9C or truncated to 0xFFFFFF9C.
         // Both should be recognized.
         let abs_path = std::path::PathBuf::from("/absolute");
+        #[allow(clippy::unnecessary_cast)]
         let at_fdcwd_32 = libc::AT_FDCWD as i32 as u32 as u64; // 0xFFFFFF9C
         let at_fdcwd_64 = libc::AT_FDCWD as i64 as u64; // 0xFFFFFFFFFFFFFF9C
 
