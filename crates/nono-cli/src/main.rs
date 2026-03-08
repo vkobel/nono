@@ -574,13 +574,26 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
     let mut merged_globs = prepared.rollback_exclude_globs;
     merged_globs.extend(cli_exclude_globs);
 
+    // Select execution strategy. Supervised mode is needed when any feature
+    // requires a parent process: rollback snapshots, network proxy, capability
+    // elevation (seccomp + PTY), or trust interception. Direct mode (exec,
+    // nono disappears) gives the child native terminal access — required for
+    // TUI programs like Claude Code that call setRawMode.
+    let needs_supervised =
+        rollback || proxy_active || prepared.capability_elevation || trust_scan_verified;
+    let strategy = if needs_supervised {
+        exec_strategy::ExecStrategy::Supervised
+    } else {
+        exec_strategy::ExecStrategy::Direct
+    };
+
     execute_sandboxed(
         program,
         cmd_args,
         prepared.caps,
         prepared.secrets,
         ExecutionFlags {
-            strategy: exec_strategy::ExecStrategy::Supervised,
+            strategy,
             no_diagnostics,
             rollback,
             no_rollback: run_args.no_rollback,
