@@ -2019,15 +2019,39 @@ The ONLY solution is to restart the session with additional --allow flags.";
 ///
 /// Returns the path to the temp file, or None if writing failed.
 fn write_system_prompt_file(silent: bool) -> Option<std::path::PathBuf> {
-    let prompt_file = std::env::temp_dir().join(format!(".nono-prompt-{}.txt", std::process::id()));
-    if let Err(e) = std::fs::write(&prompt_file, NONO_SYSTEM_PROMPT) {
-        error!("Failed to write system prompt file: {}", e);
-        if !silent {
-            eprintln!("  WARNING: System prompt file could not be written.");
+    use std::io::Write;
+
+    // SECURITY: Use tempfile crate to create file with O_EXCL and random name,
+    // preventing symlink attacks (CWE-377) on predictable paths in /tmp.
+    match tempfile::Builder::new()
+        .prefix(".nono-prompt-")
+        .suffix(".txt")
+        .tempfile()
+    {
+        Ok(mut file) => {
+            if let Err(e) = file.write_all(NONO_SYSTEM_PROMPT.as_bytes()) {
+                error!("Failed to write system prompt file: {}", e);
+                if !silent {
+                    eprintln!("  WARNING: System prompt file could not be written.");
+                }
+                return None;
+            }
+            // Persist the file so it outlives this scope (cleaned up manually after child exits)
+            match file.into_temp_path().keep() {
+                Ok(path) => Some(path),
+                Err(e) => {
+                    error!("Failed to persist system prompt file: {}", e);
+                    None
+                }
+            }
         }
-        None
-    } else {
-        Some(prompt_file)
+        Err(e) => {
+            error!("Failed to create system prompt file: {}", e);
+            if !silent {
+                eprintln!("  WARNING: System prompt file could not be written.");
+            }
+            None
+        }
     }
 }
 
