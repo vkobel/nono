@@ -159,6 +159,68 @@ pub fn print_capabilities(caps: &CapabilitySet, verbose: u8, silent: bool) {
     eprintln!();
 }
 
+/// Print Landlock ABI information (Linux only).
+///
+/// Shows the detected ABI version and available features. When features
+/// are degraded (ABI < V5), displays which features are unavailable.
+#[cfg(target_os = "linux")]
+pub fn print_abi_info(silent: bool) {
+    if silent {
+        return;
+    }
+    match nono::Sandbox::detect_abi() {
+        Ok(detected) => {
+            let features = detected.feature_names();
+            let feature_summary: Vec<&str> = features.iter().skip(1).copied().collect();
+            if feature_summary.is_empty() {
+                eprintln!("  {} {}", "Sandbox:".white(), detected.to_string().green(),);
+            } else {
+                eprintln!(
+                    "  {} {} ({})",
+                    "Sandbox:".white(),
+                    detected.to_string().green(),
+                    feature_summary.join(", ").truecolor(150, 150, 150),
+                );
+            }
+
+            // Show what's missing when ABI < V5
+            let mut missing = Vec::new();
+            if !detected.has_refer() {
+                missing.push("Refer");
+            }
+            if !detected.has_truncate() {
+                missing.push("Truncate");
+            }
+            if !detected.has_network() {
+                missing.push("TCP filtering");
+            }
+            if !detected.has_ioctl_dev() {
+                missing.push("IoctlDev");
+            }
+            if !detected.has_scoping() {
+                missing.push("Scoping");
+            }
+            if !missing.is_empty() {
+                eprintln!(
+                    "  {}",
+                    format!(
+                        "Degraded: {} (upgrade kernel for full support)",
+                        missing.join(", ")
+                    )
+                    .truecolor(180, 150, 50),
+                );
+            }
+        }
+        Err(e) => {
+            eprintln!(
+                "  {} {}",
+                "Sandbox:".white(),
+                format!("Landlock detection failed: {}", e).red(),
+            );
+        }
+    }
+}
+
 /// Print supervised mode status
 pub fn print_supervised_info(silent: bool, rollback: bool, proxy_active: bool) {
     if silent {
