@@ -1162,8 +1162,6 @@ pub fn deny_notif(notify_fd: std::os::fd::RawFd, notif_id: u64) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::capability::CapabilitySource;
-    use std::path::PathBuf;
 
     #[test]
     fn test_is_supported() {

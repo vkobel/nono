@@ -184,7 +184,8 @@ pub fn print_abi_info(silent: bool) {
             }
 
             // Show what's missing on degraded ABI versions
-            const ALL_FEATURES: &[(&str, fn(&nono::DetectedAbi) -> bool)] = &[
+            type AbiFeatureCheck = (&'static str, fn(&nono::DetectedAbi) -> bool);
+            const ALL_FEATURES: &[AbiFeatureCheck] = &[
                 ("Refer", nono::DetectedAbi::has_refer),
                 ("Truncate", nono::DetectedAbi::has_truncate),
                 ("TCP filtering", nono::DetectedAbi::has_network),
