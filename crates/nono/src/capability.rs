@@ -368,10 +368,10 @@ pub enum SignalMode {
     /// delivering SIGINT to the foreground process group) are delivered
     /// by the kernel and bypass the sandbox filter.
     ///
-    /// On Linux: **not yet enforced.** Landlock V6 scoping
-    /// (`LANDLOCK_SCOPE_SIGNAL`) will provide equivalent isolation once
-    /// implemented (see issue #255). Until then, sandboxed processes on
-    /// Linux can still call `kill(2)`/`tkill(2)`/`tgkill(2)` freely.
+    /// On Linux: not fully enforceable with current Landlock semantics.
+    /// Landlock V6 `LANDLOCK_SCOPE_SIGNAL` can restrict signaling to
+    /// processes in the same sandbox, but it cannot express "self only".
+    /// This mode therefore remains best-effort on Linux.
     #[default]
     Isolated,
     /// Signals allowed to child processes in the same sandbox only.
@@ -380,8 +380,9 @@ pub enum SignalMode {
     /// Permits signaling any process that inherited the sandbox (i.e., forked
     /// or exec'd children), but blocks signals to external processes.
     ///
-    /// On Linux: not yet enforced; behaves identically to `Isolated` until
-    /// Landlock V6 signal scoping is implemented (see issue #255).
+    /// On Linux: enforced on Landlock V6+ with `LANDLOCK_SCOPE_SIGNAL`.
+    /// This blocks signaling processes outside the current sandbox while
+    /// still allowing signals to same-sandbox descendants.
     AllowSameSandbox,
     /// Signals allowed to any process (no filtering).
     AllowAll,
