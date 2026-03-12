@@ -32,22 +32,24 @@
 > [!NOTE]
 > See our [latest release](https://github.com/always-further/nono/releases/latest) or [CHANGELOG.md](./CHANGELOG.md) for release notes.
 
-AI agents get filesystem access, run shell commands, and are inherently open to prompt injection. The standard response is guardrails and policies. The problem is that policies can be bypassed and guardrails linguistically overcome.
+AI agents get filesystem access, run shell commands, and are wide open to prompt injections. The standard response is guardrails and policies. The problem is that policies can be bypassed — and guardrails can be talked out of.
 
-Wrap your AI agent in a kernel-isolated sandbox in seconds. API key protection, destructive action guardrails, full rollback. Zero latency overhead.
+Security is a structural problem. You can't prompt-engineer your way to safety and software guardrails don't work, yet you don't want to spend time dealing with docker volume mounts, or setting up a hypervisor.
 
-Support for **MacOS**, **Linux** and Windows support on the way
+With nono, you don't have to. nono wraps your agent in a kernel-isolated sandbox in seconds — with API key protection, destructive action guardrails, and full snapshot/rollback built in. No hypervisor to configure. No container volume mounts. Zero latency overhead.
+
+---
+
+**Platform support:** macOS and Linux now. Windows coming soon.
 
 **Homebrew (macOS/Linux)**
-
 ```bash
 brew install nono
 ```
 
-**Other Options**
+**Other install options**
 
-See the [Installation Guide](https://docs.nono.sh/cli/getting_started/installation) for prebuilt binaries and package manager instructions.
-
+Prebuilt binaries and package manager instructions are in the [Installation Guide](https://docs.nono.sh/cli/getting_started/installation).
 ## CLI
 
 The CLI is the quickest way to get going! zero startup latency, no need to install hypervisors, runtimes, mount volumes...sandboxed and protected in a single command
