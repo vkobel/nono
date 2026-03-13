@@ -298,6 +298,9 @@ Every profile's effective capability set is built through composition:
 4. **profile.filesystem** entries are additive
 5. **CLI overrides** (`--allow`, `--read`, etc.) are applied last
 
+Exclusions are applied after group addition. If the same group appears in both
+`security.groups` and the effective exclusions, the exclusion wins.
+
 ### Group Taxonomy
 
 Groups use a structured allow/deny taxonomy:

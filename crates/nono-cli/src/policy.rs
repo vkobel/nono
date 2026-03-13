@@ -111,6 +111,8 @@ pub struct ProfileDef {
     #[serde(default)]
     pub exclude_groups: Vec<String>,
     /// Deprecated legacy built-in profile exclusions.
+    /// Kept for backward-compatible deserialization of embedded/user-authored
+    /// policy JSON that still uses `trust_groups`.
     #[serde(default)]
     pub trust_groups: Vec<String>,
     #[serde(default)]
@@ -139,11 +141,8 @@ impl ProfileDef {
     /// Convert to a raw Profile without merging base_groups.
     pub fn to_raw_profile(&self) -> profile::Profile {
         let mut policy = self.policy.clone();
-        policy.exclude_groups = combine_group_exclusions(
-            &self.exclude_groups,
-            &self.trust_groups,
-            &self.policy.exclude_groups,
-        );
+        let combined = profile::dedup_append(&self.exclude_groups, &self.trust_groups);
+        policy.exclude_groups = profile::dedup_append(&combined, &self.policy.exclude_groups);
         profile::Profile {
             extends: self.extends.clone(),
             meta: self.meta.clone(),
@@ -167,21 +166,6 @@ impl ProfileDef {
             interactive: self.interactive,
         }
     }
-}
-
-fn combine_group_exclusions(
-    primary: &[String],
-    legacy: &[String],
-    additional: &[String],
-) -> Vec<String> {
-    let mut combined = Vec::new();
-    let mut seen = HashSet::new();
-    for group in primary.iter().chain(legacy.iter()).chain(additional.iter()) {
-        if seen.insert(group.clone()) {
-            combined.push(group.clone());
-        }
-    }
-    combined
 }
 
 // ============================================================================

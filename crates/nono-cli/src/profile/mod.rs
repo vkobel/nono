@@ -689,8 +689,8 @@ pub struct SecurityConfig {
     #[serde(default)]
     pub groups: Vec<String>,
     /// Deprecated legacy exclusions. Prefer `policy.exclude_groups`.
+    /// Kept for backward-compatible deserialization and merge behavior.
     #[serde(default)]
-    #[allow(dead_code)]
     pub trust_groups: Vec<String>,
     /// Commands to allow even when blocked by default policy (e.g. `["rm"]`).
     /// Applied before CLI `--allow-command` overrides.
@@ -872,6 +872,10 @@ pub(crate) fn resolve_and_finalize_profile(profile: Profile) -> Result<Profile> 
 /// `security.groups`. Built-in profiles also resolve through the same raw
 /// profile pipeline before base_groups are merged.
 /// This function applies: `((base_groups + profile.groups) - effective_exclusions)`.
+///
+/// This means exclusions win even if the same group is also added explicitly in
+/// `security.groups`. That is an intentional shift toward a single, consistent
+/// exclusion model as `trust_groups` is deprecated.
 fn merge_base_groups(profile: &mut Profile) -> Result<()> {
     let policy = crate::policy::load_embedded_policy()?;
     let exclusions = effective_group_exclusions(profile);
@@ -894,6 +898,7 @@ fn merge_base_groups(profile: &mut Profile) -> Result<()> {
     Ok(())
 }
 
+/// Merge legacy `security.trust_groups` with preferred `policy.exclude_groups`.
 pub(crate) fn effective_group_exclusions(profile: &Profile) -> Vec<String> {
     dedup_append(
         &profile.security.trust_groups,
@@ -1118,7 +1123,7 @@ fn merge_profiles(base: Profile, child: Profile) -> Profile {
 }
 
 /// Append child items after base items, deduplicating while preserving order.
-fn dedup_append<T: Eq + std::hash::Hash + Clone>(base: &[T], child: &[T]) -> Vec<T> {
+pub(crate) fn dedup_append<T: Eq + std::hash::Hash + Clone>(base: &[T], child: &[T]) -> Vec<T> {
     let mut seen = std::collections::HashSet::with_capacity(base.len() + child.len());
     let mut result = Vec::with_capacity(base.len() + child.len());
     for item in base.iter().chain(child.iter()) {
