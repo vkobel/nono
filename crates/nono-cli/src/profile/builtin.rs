@@ -195,15 +195,14 @@ mod tests {
     }
 
     #[test]
-    fn test_trust_groups_exclusion() {
-        // Verify that trust_groups mechanism works by checking openclaw
-        // doesn't have groups it shouldn't (trust_groups is empty for all
-        // current profiles, but the merging path is exercised)
+    fn test_profile_exclusion_mechanism() {
+        // Verify that built-in profiles resolve exclusions through the shared
+        // group-exclusion path. Current embedded profiles do not exclude any.
         let profile = get_builtin("openclaw").expect("Profile not found");
         let base = crate::policy::load_embedded_policy()
             .expect("load embedded policy")
             .base_groups;
-        // All base groups should be present since trust_groups is empty
+        // All base groups should be present since embedded exclusions are empty.
         for group in &base {
             assert!(
                 profile.security.groups.contains(group),

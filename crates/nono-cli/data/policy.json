@@ -590,7 +590,6 @@
         "groups": [],
         "signal_mode": "isolated"
       },
-      "trust_groups": [],
       "filesystem": {},
       "network": { "block": false },
       "workdir": { "access": "none" },
@@ -621,7 +620,6 @@
         "signal_mode": "isolated",
         "capability_elevation": false
       },
-      "trust_groups": [],
       "filesystem": {
         "allow": ["$HOME/.claude"],
         "allow_file": ["$HOME/.claude.json", "$HOME/.claude.json.lock"],
@@ -669,7 +667,6 @@
         "signal_mode": "isolated",
         "capability_elevation": false
       },
-      "trust_groups": [],
       "filesystem": {
         "allow": ["$HOME/.codex"]
       },
@@ -696,7 +693,6 @@
         "groups": ["node_runtime"],
         "signal_mode": "isolated"
       },
-      "trust_groups": [],
       "filesystem": {
         "allow": [
           "$HOME/.openclaw",
@@ -724,7 +720,6 @@
         "groups": ["user_caches_macos", "user_caches_linux", "node_runtime", "opencode_linux", "unlink_protection"],
         "signal_mode": "isolated"
       },
-      "trust_groups": [],
       "filesystem": {
         "allow": [
           "$HOME/.config/opencode",
@@ -752,7 +747,6 @@
         "groups": ["python_runtime"],
         "signal_mode": "isolated"
       },
-      "trust_groups": [],
       "filesystem": {},
       "network": { "block": false, "network_profile": "developer" },
       "workdir": { "access": "readwrite" },
@@ -770,7 +764,6 @@
         "groups": ["node_runtime"],
         "signal_mode": "isolated"
       },
-      "trust_groups": [],
       "filesystem": {},
       "network": { "block": false, "network_profile": "developer" },
       "workdir": { "access": "readwrite" },
@@ -788,7 +781,6 @@
         "groups": ["go_runtime"],
         "signal_mode": "isolated"
       },
-      "trust_groups": [],
       "filesystem": {},
       "network": { "block": false, "network_profile": "developer" },
       "workdir": { "access": "readwrite" },
@@ -806,7 +798,6 @@
         "groups": ["rust_runtime"],
         "signal_mode": "isolated"
       },
-      "trust_groups": [],
       "filesystem": {},
       "network": { "block": false, "network_profile": "developer" },
       "workdir": { "access": "readwrite" },
@@ -831,7 +822,6 @@
         "signal_mode": "isolated",
         "capability_elevation": false
       },
-      "trust_groups": [],
       "filesystem": {
         "allow": [
           "$HOME/.config/swival",
