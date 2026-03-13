@@ -232,15 +232,13 @@ mod tests {
     fn test_default_profile_deny_paths_match_base_groups() {
         let policy = crate::policy::load_embedded_policy().expect("load policy");
         let base = crate::policy::base_groups().expect("load base groups");
-        let base_deny =
-            crate::policy::resolve_deny_paths_for_groups(&policy, &base).expect("resolve base deny");
+        let base_deny = crate::policy::resolve_deny_paths_for_groups(&policy, &base)
+            .expect("resolve base deny");
 
         let default = get_builtin("default").expect("default profile");
-        let default_deny = crate::policy::resolve_deny_paths_for_groups(
-            &policy,
-            &default.security.groups,
-        )
-        .expect("resolve default deny");
+        let default_deny =
+            crate::policy::resolve_deny_paths_for_groups(&policy, &default.security.groups)
+                .expect("resolve default deny");
 
         let mut base_rendered: Vec<String> = base_deny
             .iter()
