@@ -102,6 +102,8 @@ pub struct DenyOps {
 #[derive(Debug, Clone, Default, Deserialize)]
 pub struct ProfileDef {
     #[serde(default)]
+    pub extends: Option<String>,
+    #[serde(default)]
     pub meta: profile::ProfileMeta,
     #[serde(default)]
     pub security: profile::SecurityConfig,
@@ -110,6 +112,8 @@ pub struct ProfileDef {
     pub trust_groups: Vec<String>,
     #[serde(default)]
     pub filesystem: profile::FilesystemConfig,
+    #[serde(default)]
+    pub policy: profile::PolicyPatchConfig,
     #[serde(default)]
     pub network: profile::NetworkConfig,
     #[serde(default, alias = "secrets")]
@@ -129,26 +133,13 @@ pub struct ProfileDef {
 }
 
 impl ProfileDef {
-    /// Convert to a full Profile with merged group list.
-    ///
-    /// Computes: `(base_groups - trust_groups) + security.groups`
-    ///
-    /// Returns an error if trust_groups attempts to remove a required group.
-    pub fn to_profile(&self, base_groups: &[String], policy: &Policy) -> Result<profile::Profile> {
-        validate_trust_groups(policy, &self.trust_groups)?;
-
-        let mut groups: Vec<String> = base_groups
-            .iter()
-            .filter(|g| !self.trust_groups.contains(g))
-            .cloned()
-            .collect();
-        groups.extend(self.security.groups.clone());
-
-        Ok(profile::Profile {
-            extends: None,
+    /// Convert to a raw Profile without merging base_groups.
+    pub fn to_raw_profile(&self) -> profile::Profile {
+        profile::Profile {
+            extends: self.extends.clone(),
             meta: self.meta.clone(),
             security: profile::SecurityConfig {
-                groups,
+                groups: self.security.groups.clone(),
                 trust_groups: self.trust_groups.clone(),
                 allowed_commands: self.security.allowed_commands.clone(),
                 signal_mode: self.security.signal_mode,
@@ -156,6 +147,7 @@ impl ProfileDef {
                 capability_elevation: self.security.capability_elevation,
             },
             filesystem: self.filesystem.clone(),
+            policy: self.policy.clone(),
             network: self.network.clone(),
             env_credentials: self.env_credentials.clone(),
             workdir: self.workdir.clone(),
@@ -164,7 +156,7 @@ impl ProfileDef {
             open_urls: self.open_urls.clone(),
             allow_launch_services: self.allow_launch_services,
             interactive: self.interactive,
-        })
+        }
     }
 }
 
@@ -454,7 +446,7 @@ fn add_fs_capability(
 ///
 /// Uses `subpath` for directories, `literal` for files.
 /// For non-existent paths, defaults to `subpath` (defensive).
-fn add_deny_access_rules(
+pub(crate) fn add_deny_access_rules(
     path_str: &str,
     caps: &mut CapabilitySet,
     deny_paths: &mut Vec<PathBuf>,
@@ -966,12 +958,12 @@ pub fn get_system_read_paths(policy: &Policy) -> Vec<String> {
     result
 }
 
-/// Validate that trust_groups does not attempt to remove any required groups.
+/// Validate that a group exclusion list does not attempt to remove required groups.
 ///
 /// Required groups have `required: true` in policy.json and cannot be excluded
 /// by profiles or user configuration. Returns an error listing all violations.
-pub fn validate_trust_groups(policy: &Policy, trust_groups: &[String]) -> Result<()> {
-    let violations: Vec<&String> = trust_groups
+pub fn validate_group_exclusions(policy: &Policy, excluded_groups: &[String]) -> Result<()> {
+    let violations: Vec<&String> = excluded_groups
         .iter()
         .filter(|name| policy.groups.get(name.as_str()).is_some_and(|g| g.required))
         .collect();
@@ -992,6 +984,11 @@ pub fn validate_trust_groups(policy: &Policy, trust_groups: &[String]) -> Result
     )))
 }
 
+/// Backward-compatible validator name for existing trust_groups callers.
+pub fn validate_trust_groups(policy: &Policy, trust_groups: &[String]) -> Result<()> {
+    validate_group_exclusions(policy, trust_groups)
+}
+
 /// Common deny + system groups shared by all sandbox invocations.
 ///
 /// Reads from the embedded policy.json `base_groups` array. This is the base
@@ -1008,7 +1005,9 @@ pub fn base_groups() -> Result<Vec<String>> {
 pub fn get_policy_profile(name: &str) -> Result<Option<profile::Profile>> {
     let policy = load_embedded_policy()?;
     match policy.profiles.get(name) {
-        Some(def) => Ok(Some(def.to_profile(&policy.base_groups, &policy)?)),
+        Some(def) => Ok(Some(crate::profile::resolve_and_finalize_profile(
+            def.to_raw_profile(),
+        )?)),
         None => Ok(None),
     }
 }
