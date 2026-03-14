@@ -2357,16 +2357,6 @@ mod tests {
 
     #[test]
     fn test_check_blocked_command_basic() {
-        assert!(config::check_blocked_command("rm", &[], &[])
-            .expect("policy must load")
-            .is_some());
-        assert!(config::check_blocked_command("dd", &[], &[])
-            .expect("policy must load")
-            .is_some());
-        assert!(config::check_blocked_command("chmod", &[], &[])
-            .expect("policy must load")
-            .is_some());
-
         assert!(config::check_blocked_command("echo", &[], &[])
             .expect("policy must load")
             .is_none());
@@ -2380,13 +2370,14 @@ mod tests {
 
     #[test]
     fn test_check_blocked_command_with_path() {
-        assert!(config::check_blocked_command("/bin/rm", &[], &[])
+        let blocked = vec!["rm".to_string(), "dd".to_string()];
+        assert!(config::check_blocked_command("/bin/rm", &[], &blocked)
             .expect("policy must load")
             .is_some());
-        assert!(config::check_blocked_command("/usr/bin/dd", &[], &[])
+        assert!(config::check_blocked_command("/usr/bin/dd", &[], &blocked)
             .expect("policy must load")
             .is_some());
-        assert!(config::check_blocked_command("./rm", &[], &[])
+        assert!(config::check_blocked_command("./rm", &[], &blocked)
             .expect("policy must load")
             .is_some());
     }
@@ -2394,10 +2385,11 @@ mod tests {
     #[test]
     fn test_check_blocked_command_allow_override() {
         let allowed = vec!["rm".to_string()];
-        assert!(config::check_blocked_command("rm", &allowed, &[])
+        let blocked = vec!["rm".to_string(), "dd".to_string()];
+        assert!(config::check_blocked_command("rm", &allowed, &blocked)
             .expect("policy must load")
             .is_none());
-        assert!(config::check_blocked_command("dd", &allowed, &[])
+        assert!(config::check_blocked_command("dd", &allowed, &blocked)
             .expect("policy must load")
             .is_some());
     }
@@ -2412,7 +2404,14 @@ mod tests {
         );
         assert!(config::check_blocked_command("rm", &[], &extra)
             .expect("policy must load")
-            .is_some());
+            .is_none());
+    }
+
+    #[test]
+    fn test_check_blocked_command_uses_resolved_policy_only() {
+        assert!(config::check_blocked_command("rm", &[], &[])
+            .expect("policy must load")
+            .is_none());
     }
 
     #[test]
