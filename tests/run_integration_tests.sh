@@ -151,7 +151,11 @@ for entry in "${SUITES[@]}"; do
                 wait "$pid" 2>/dev/null || true
             fi
         done
-        PIDS=("${NEW_PIDS[@]}")
+        if [[ ${#NEW_PIDS[@]} -gt 0 ]]; then
+            PIDS=("${NEW_PIDS[@]}")
+        else
+            PIDS=()
+        fi
         if [[ ${#PIDS[@]} -ge $MAX_JOBS ]]; then
             sleep 0.2
         fi

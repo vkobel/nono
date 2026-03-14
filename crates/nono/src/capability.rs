@@ -781,6 +781,22 @@ impl CapabilitySet {
         Ok(())
     }
 
+    /// Remove exact file capabilities whose original or resolved path matches
+    /// any of the provided denied paths.
+    ///
+    /// Directory capabilities are preserved so platform-specific deny rules can
+    /// still narrow access within an allowed tree.
+    pub fn remove_exact_file_caps_for_paths(&mut self, denied_paths: &[PathBuf]) -> usize {
+        let before = self.fs.len();
+        self.fs.retain(|cap| {
+            !cap.is_file
+                || !denied_paths
+                    .iter()
+                    .any(|denied| cap.original == *denied || cap.resolved == *denied)
+        });
+        before.saturating_sub(self.fs.len())
+    }
+
     // Accessors
 
     /// Get filesystem capabilities
@@ -1779,5 +1795,24 @@ mod tests {
         caps.add_fs(FsCapability::new_file(&file_path, AccessMode::ReadWrite).unwrap());
 
         assert!(!caps.path_covered_with_access(&file_canonical, AccessMode::Read));
+    }
+
+    #[test]
+    fn test_remove_exact_file_caps_for_paths_matches_original_and_resolved() {
+        let dir = tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        fs::write(&target, "secret").unwrap();
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        let mut caps = CapabilitySet::new();
+        caps.add_fs(FsCapability::new_file(&link, AccessMode::Read).unwrap());
+        caps.add_fs(FsCapability::new_dir(dir.path(), AccessMode::Read).unwrap());
+
+        let removed = caps.remove_exact_file_caps_for_paths(&[link.clone(), target.clone()]);
+
+        assert_eq!(removed, 1);
+        assert_eq!(caps.fs_capabilities().len(), 1);
+        assert!(!caps.fs_capabilities()[0].is_file);
     }
 }

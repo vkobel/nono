@@ -375,6 +375,11 @@ fn finalize_caps(
     // Apply deny overrides before validation (punch holes through deny groups)
     policy::apply_deny_overrides(&args.override_deny, &mut resolved.deny_paths, caps)?;
 
+    // Remove exact file grants for the deny paths that remain after overrides.
+    // This lets profile deny patches override inherited file capabilities while
+    // preserving `--override-deny` validation against the original grant set.
+    caps.remove_exact_file_caps_for_paths(&resolved.deny_paths);
+
     // Validate deny/allow overlaps (hard-fail on Linux where Landlock cannot enforce denies)
     policy::validate_deny_overlaps(&resolved.deny_paths, caps)?;
 
@@ -783,6 +788,94 @@ mod tests {
         assert!(
             err.to_string().contains("Landlock deny-overlap"),
             "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn test_from_profile_policy_add_deny_access_removes_symlinked_file_grant() {
+        let dir = tempdir().expect("tmpdir");
+        let target = dir.path().join("real_gitconfig");
+        std::fs::write(&target, "[user]\n").expect("write target");
+        let target_canonical = target.canonicalize().expect("canonicalize target");
+        let link = dir.path().join(".gitconfig");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+
+        let profile_path = dir.path().join("policy-deny-file-symlink.json");
+        std::fs::write(
+            &profile_path,
+            format!(
+                r#"{{
+                    "meta": {{ "name": "policy-deny-file-symlink" }},
+                    "filesystem": {{
+                        "read_file": ["{}"]
+                    }},
+                    "policy": {{
+                        "add_deny_access": ["{}"]
+                    }}
+                }}"#,
+                target.display(),
+                link.display()
+            ),
+        )
+        .expect("write profile");
+        let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
+
+        let workdir = tempdir().expect("workdir");
+        let args = sandbox_args();
+
+        let (caps, _) =
+            CapabilitySet::from_profile(&profile, workdir.path(), &args).expect("build caps");
+
+        assert!(
+            !caps
+                .fs_capabilities()
+                .iter()
+                .any(|cap| cap.is_file && cap.resolved == target_canonical),
+            "deny patch should remove the inherited file grant for the symlink target"
+        );
+    }
+
+    #[test]
+    fn test_from_profile_policy_add_deny_access_respects_override_deny_for_symlinked_file() {
+        let dir = tempdir().expect("tmpdir");
+        let target = dir.path().join("real_gitconfig");
+        std::fs::write(&target, "[user]\n").expect("write target");
+        let target_canonical = target.canonicalize().expect("canonicalize target");
+        let link = dir.path().join(".gitconfig");
+        std::os::unix::fs::symlink(&target, &link).expect("create symlink");
+
+        let profile_path = dir.path().join("policy-deny-file-symlink-override.json");
+        std::fs::write(
+            &profile_path,
+            format!(
+                r#"{{
+                    "meta": {{ "name": "policy-deny-file-symlink-override" }},
+                    "filesystem": {{
+                        "read_file": ["{}"]
+                    }},
+                    "policy": {{
+                        "add_deny_access": ["{}"]
+                    }}
+                }}"#,
+                target.display(),
+                link.display()
+            ),
+        )
+        .expect("write profile");
+        let profile = crate::profile::load_profile_from_path(&profile_path).expect("load profile");
+
+        let workdir = tempdir().expect("workdir");
+        let mut args = sandbox_args();
+        args.override_deny = vec![target.clone()];
+
+        let (caps, _) =
+            CapabilitySet::from_profile(&profile, workdir.path(), &args).expect("build caps");
+
+        assert!(
+            caps.fs_capabilities()
+                .iter()
+                .any(|cap| cap.is_file && cap.resolved == target_canonical),
+            "override should preserve the inherited file grant for the denied symlink target"
         );
     }
 
