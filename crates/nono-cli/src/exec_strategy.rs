@@ -172,6 +172,8 @@ pub struct ExecConfig<'a> {
     pub env_vars: Vec<(&'a str, &'a str)>,
     /// Path to the capability state file.
     pub cap_file: &'a std::path::Path,
+    /// Directory the child process should start in.
+    pub current_dir: &'a std::path::Path,
     /// Whether to suppress diagnostic output.
     pub no_diagnostics: bool,
     /// Threading context for fork safety validation.
@@ -221,6 +223,7 @@ pub fn execute_direct(config: &ExecConfig<'_>) -> Result<()> {
 
     let mut cmd = Command::new(config.resolved_program);
     cmd.env_clear();
+    cmd.current_dir(config.current_dir);
 
     for (key, value) in std::env::vars() {
         if !should_skip_env_var(&key, &config.env_vars, &["NONO_CAP_FILE"]) {
@@ -638,6 +641,15 @@ pub fn execute_supervised(
 
             // Close inherited FDs (but keep stdin/stdout/stderr and supervisor socket)
             close_inherited_fds(max_fd, &child_keep_fds);
+
+            if let Err(e) = nix::unistd::chdir(config.current_dir) {
+                eprintln!(
+                    "nono: failed to enter child working directory {}: {}",
+                    config.current_dir.display(),
+                    e
+                );
+                std::process::exit(126);
+            }
 
             // Execute using pre-prepared CStrings (no allocation)
             unsafe {
