@@ -298,16 +298,38 @@ fn expand_paths_json(paths: &[String]) -> serde_json::Value {
 // nono policy profiles
 // ---------------------------------------------------------------------------
 
+/// Determine the actual source of a loaded profile.
+///
+/// Load precedence is user-first (profile/mod.rs), so a user file with a
+/// built-in name shadows the built-in. We must check the filesystem to
+/// report the real source accurately.
+fn profile_source(name: &str) -> &'static str {
+    let builtin_names = profile::builtin::list_builtin();
+    if profile::is_user_override(name) {
+        if builtin_names.contains(&name.to_string()) {
+            "user (overrides built-in)"
+        } else {
+            "user"
+        }
+    } else if builtin_names.contains(&name.to_string()) {
+        "built-in"
+    } else {
+        "user"
+    }
+}
+
 fn cmd_profiles(args: PolicyProfilesArgs) -> Result<()> {
     let builtin_names = profile::builtin::list_builtin();
     let all_names = profile::list_profiles();
 
-    let mut builtin_profiles: Vec<(String, Option<Profile>)> = Vec::new();
-    let mut user_profiles: Vec<(String, Option<Profile>)> = Vec::new();
+    let mut builtin_profiles: Vec<(String, Result<Profile>)> = Vec::new();
+    let mut user_profiles: Vec<(String, Result<Profile>)> = Vec::new();
 
     for name in &all_names {
-        let p = profile::load_profile(name).ok();
-        if builtin_names.contains(name) {
+        let p = profile::load_profile(name);
+        // Categorize by actual source: user overrides of built-in names
+        // go under user section to make shadowing visible.
+        if builtin_names.contains(name) && !profile::is_user_override(name) {
             builtin_profiles.push((name.clone(), p));
         } else {
             user_profiles.push((name.clone(), p));
@@ -315,30 +337,28 @@ fn cmd_profiles(args: PolicyProfilesArgs) -> Result<()> {
     }
 
     if args.json {
-        let format_entry = |name: &str, profile: &Option<Profile>, source: &str| {
-            let (desc, extends) = match profile {
-                Some(p) => (
-                    p.meta.description.as_deref().unwrap_or(""),
-                    p.extends.as_deref().unwrap_or(""),
-                ),
-                None => ("", ""),
-            };
-            serde_json::json!({
-                "name": name,
-                "source": source,
-                "description": desc,
-                "extends": extends,
-            })
+        let format_entry = |name: &str, result: &Result<Profile>| {
+            let source = profile_source(name);
+            let extends = profile::load_profile_extends(name).unwrap_or_default();
+            match result {
+                Ok(p) => serde_json::json!({
+                    "name": name,
+                    "source": source,
+                    "description": p.meta.description.as_deref().unwrap_or(""),
+                    "extends": extends,
+                }),
+                Err(e) => serde_json::json!({
+                    "name": name,
+                    "source": source,
+                    "error": format!("{}", e),
+                }),
+            }
         };
 
         let arr: Vec<serde_json::Value> = builtin_profiles
             .iter()
-            .map(|(n, p)| format_entry(n, p, "built-in"))
-            .chain(
-                user_profiles
-                    .iter()
-                    .map(|(n, p)| format_entry(n, p, "user")),
-            )
+            .map(|(n, p)| format_entry(n, p))
+            .chain(user_profiles.iter().map(|(n, p)| format_entry(n, p)))
             .collect();
         println!("{}", serde_json::to_string_pretty(&arr).unwrap_or_default());
         return Ok(());
@@ -351,8 +371,8 @@ fn cmd_profiles(args: PolicyProfilesArgs) -> Result<()> {
     if !builtin_profiles.is_empty() {
         println!();
         println!("  {}", theme::fg("Built-in:", t.subtext).bold());
-        for (name, profile) in &builtin_profiles {
-            print_profile_line(name, profile, t);
+        for (name, result) in &builtin_profiles {
+            print_profile_line(name, result, t);
         }
     }
 
@@ -362,31 +382,36 @@ fn cmd_profiles(args: PolicyProfilesArgs) -> Result<()> {
             "  {}",
             theme::fg("User (~/.config/nono/profiles/):", t.subtext).bold()
         );
-        for (name, profile) in &user_profiles {
-            print_profile_line(name, profile, t);
+        for (name, result) in &user_profiles {
+            print_profile_line(name, result, t);
         }
     }
 
     Ok(())
 }
 
-fn print_profile_line(name: &str, profile: &Option<Profile>, t: &theme::Theme) {
-    let (desc, extends) = match profile {
-        Some(p) => (
-            p.meta.description.as_deref().unwrap_or("").to_string(),
-            p.extends
-                .as_ref()
+fn print_profile_line(name: &str, result: &Result<Profile>, t: &theme::Theme) {
+    match result {
+        Ok(p) => {
+            let desc = p.meta.description.as_deref().unwrap_or("").to_string();
+            let extends = profile::load_profile_extends(name)
                 .map(|e| format!("extends {}", e))
-                .unwrap_or_default(),
-        ),
-        None => (String::new(), String::new()),
-    };
-    println!(
-        "    {:<16} {:<42} {}",
-        theme::fg(name, t.text).bold(),
-        theme::fg(&desc, t.subtext),
-        theme::fg(&extends, t.overlay),
-    );
+                .unwrap_or_default();
+            println!(
+                "    {:<16} {:<42} {}",
+                theme::fg(name, t.text).bold(),
+                theme::fg(&desc, t.subtext),
+                theme::fg(&extends, t.overlay),
+            );
+        }
+        Err(e) => {
+            println!(
+                "    {:<16} {}",
+                theme::fg(name, t.text).bold(),
+                theme::fg(&format!("[error: {}]", e), t.red),
+            );
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -394,10 +419,11 @@ fn print_profile_line(name: &str, profile: &Option<Profile>, t: &theme::Theme) {
 // ---------------------------------------------------------------------------
 
 fn cmd_show(args: PolicyShowArgs) -> Result<()> {
+    let raw_extends = profile::load_profile_extends(&args.profile);
     let profile = profile::load_profile(&args.profile)?;
 
     if args.json {
-        let val = profile_to_json(&args.profile, &profile);
+        let val = profile_to_json(&args.profile, &profile, &raw_extends);
         println!("{}", serde_json::to_string_pretty(&val).unwrap_or_default());
         return Ok(());
     }
@@ -418,7 +444,7 @@ fn cmd_show(args: PolicyShowArgs) -> Result<()> {
             theme::fg(desc, t.text)
         );
     }
-    if let Some(ref extends) = profile.extends {
+    if let Some(ref extends) = raw_extends {
         println!(
             "  {}      {}",
             theme::fg("Extends:", t.subtext),
@@ -636,11 +662,15 @@ fn print_fs_paths(label: &str, paths: &[String], t: &theme::Theme, raw: bool) {
     }
 }
 
-fn profile_to_json(name: &str, profile: &Profile) -> serde_json::Value {
+fn profile_to_json(
+    name: &str,
+    profile: &Profile,
+    raw_extends: &Option<String>,
+) -> serde_json::Value {
     let mut val = serde_json::json!({
         "name": name,
         "description": profile.meta.description.as_deref().unwrap_or(""),
-        "extends": profile.extends.as_deref().unwrap_or(""),
+        "extends": raw_extends.as_deref().unwrap_or(""),
     });
 
     // Security
@@ -693,12 +723,42 @@ fn profile_to_json(name: &str, profile: &Profile) -> serde_json::Value {
         "exclude_globs": profile.rollback.exclude_globs,
     });
 
+    // Env credentials
+    if !profile.env_credentials.mappings.is_empty() {
+        val["env_credentials"] = serde_json::json!(profile.env_credentials.mappings);
+    }
+
+    // Hooks
+    if !profile.hooks.hooks.is_empty() {
+        let hooks: serde_json::Map<String, serde_json::Value> = profile
+            .hooks
+            .hooks
+            .iter()
+            .map(|(k, v)| {
+                (
+                    k.clone(),
+                    serde_json::json!({
+                        "event": v.event,
+                        "matcher": v.matcher,
+                        "script": v.script,
+                    }),
+                )
+            })
+            .collect();
+        val["hooks"] = serde_json::Value::Object(hooks);
+    }
+
     // Open URLs
     if let Some(ref urls) = profile.open_urls {
         val["open_urls"] = serde_json::json!({
             "allow_origins": urls.allow_origins,
             "allow_localhost": urls.allow_localhost,
         });
+    }
+
+    // Allow launch services
+    if let Some(als) = profile.allow_launch_services {
+        val["allow_launch_services"] = serde_json::json!(als);
     }
 
     val
@@ -832,6 +892,26 @@ fn cmd_diff(args: PolicyDiffArgs) -> Result<()> {
         }
     }
 
+    // Security scalar fields
+    any_diff |= diff_scalar_option(
+        "capability_elevation",
+        &p1.security.capability_elevation.map(|v| format!("{v}")),
+        &p2.security.capability_elevation.map(|v| format!("{v}")),
+        t,
+    );
+    any_diff |= diff_scalar_option(
+        "signal_mode",
+        &p1.security.signal_mode.map(|v| format!("{v:?}")),
+        &p2.security.signal_mode.map(|v| format!("{v:?}")),
+        t,
+    );
+    any_diff |= diff_scalar_option(
+        "process_info_mode",
+        &p1.security.process_info_mode.map(|v| format!("{v:?}")),
+        &p2.security.process_info_mode.map(|v| format!("{v:?}")),
+        t,
+    );
+
     // Network
     let mut net_diffs: Vec<(String, String)> = Vec::new();
     if p1.network.block != p2.network.block {
@@ -851,7 +931,29 @@ fn cmd_diff(args: PolicyDiffArgs) -> Result<()> {
         }
     }
 
-    if !net_diffs.is_empty() {
+    let net_vec_diffs = diff_string_vecs(&[
+        (
+            "proxy_allow",
+            &p1.network.proxy_allow,
+            &p2.network.proxy_allow,
+        ),
+        (
+            "proxy_credentials",
+            &p1.network.proxy_credentials,
+            &p2.network.proxy_credentials,
+        ),
+        (
+            "external_proxy_bypass",
+            &p1.network.external_proxy_bypass,
+            &p2.network.external_proxy_bypass,
+        ),
+    ]);
+
+    let port1: Vec<String> = p1.network.port_allow.iter().map(|p| p.to_string()).collect();
+    let port2: Vec<String> = p2.network.port_allow.iter().map(|p| p.to_string()).collect();
+    let port_diffs = diff_string_vecs(&[("port_allow", &port1, &port2)]);
+
+    if !net_diffs.is_empty() || !net_vec_diffs.is_empty() || !port_diffs.is_empty() {
         any_diff = true;
         println!();
         println!("  {}:", theme::fg("Network", t.subtext).bold());
@@ -863,7 +965,23 @@ fn cmd_diff(args: PolicyDiffArgs) -> Result<()> {
                 println!("    {}", theme::fg(add, t.green));
             }
         }
+        for (label, sign, val) in net_vec_diffs.iter().chain(port_diffs.iter()) {
+            let color = if *sign == "+" { t.green } else { t.red };
+            println!(
+                "    {} {} {}",
+                theme::fg(sign, color),
+                theme::fg(label, t.subtext),
+                theme::fg(val, color)
+            );
+        }
     }
+
+    any_diff |= diff_scalar_option(
+        "external_proxy",
+        &p1.network.external_proxy,
+        &p2.network.external_proxy,
+        t,
+    );
 
     // Workdir
     if p1.workdir.access != p2.workdir.access {
@@ -908,12 +1026,324 @@ fn cmd_diff(args: PolicyDiffArgs) -> Result<()> {
         }
     }
 
+    // Rollback
+    let rb_diffs = diff_string_vecs(&[
+        (
+            "exclude_patterns",
+            &p1.rollback.exclude_patterns,
+            &p2.rollback.exclude_patterns,
+        ),
+        (
+            "exclude_globs",
+            &p1.rollback.exclude_globs,
+            &p2.rollback.exclude_globs,
+        ),
+    ]);
+    if !rb_diffs.is_empty() {
+        any_diff = true;
+        println!();
+        println!("  {}:", theme::fg("Rollback", t.subtext).bold());
+        for (label, sign, val) in &rb_diffs {
+            let color = if *sign == "+" { t.green } else { t.red };
+            println!(
+                "    {} {} {}",
+                theme::fg(sign, color),
+                theme::fg(label, t.subtext),
+                theme::fg(val, color)
+            );
+        }
+    }
+
+    // Open URLs
+    let ou1_origins: Vec<String> = p1
+        .open_urls
+        .as_ref()
+        .map(|u| u.allow_origins.clone())
+        .unwrap_or_default();
+    let ou2_origins: Vec<String> = p2
+        .open_urls
+        .as_ref()
+        .map(|u| u.allow_origins.clone())
+        .unwrap_or_default();
+    let ou_diffs = diff_string_vecs(&[("allow_origins", &ou1_origins, &ou2_origins)]);
+    let ou1_localhost = p1.open_urls.as_ref().is_some_and(|u| u.allow_localhost);
+    let ou2_localhost = p2.open_urls.as_ref().is_some_and(|u| u.allow_localhost);
+
+    if !ou_diffs.is_empty() || ou1_localhost != ou2_localhost {
+        any_diff = true;
+        println!();
+        println!("  {}:", theme::fg("Open URLs", t.subtext).bold());
+        for (label, sign, val) in &ou_diffs {
+            let color = if *sign == "+" { t.green } else { t.red };
+            println!(
+                "    {} {} {}",
+                theme::fg(sign, color),
+                theme::fg(label, t.subtext),
+                theme::fg(val, color)
+            );
+        }
+        if ou1_localhost != ou2_localhost {
+            println!(
+                "    {}",
+                theme::fg(
+                    &format!("- allow_localhost: {ou1_localhost}"),
+                    t.red
+                )
+            );
+            println!(
+                "    {}",
+                theme::fg(
+                    &format!("+ allow_localhost: {ou2_localhost}"),
+                    t.green
+                )
+            );
+        }
+    }
+
+    // Allow launch services
+    any_diff |= diff_scalar_option(
+        "allow_launch_services",
+        &p1.allow_launch_services.map(|v| format!("{v}")),
+        &p2.allow_launch_services.map(|v| format!("{v}")),
+        t,
+    );
+
+    // Env credentials
+    let ec1: BTreeSet<(&String, &String)> = p1.env_credentials.mappings.iter().collect();
+    let ec2: BTreeSet<(&String, &String)> = p2.env_credentials.mappings.iter().collect();
+    let ec_added: BTreeSet<&(&String, &String)> = ec2.difference(&ec1).collect();
+    let ec_removed: BTreeSet<&(&String, &String)> = ec1.difference(&ec2).collect();
+    if !ec_added.is_empty() || !ec_removed.is_empty() {
+        any_diff = true;
+        println!();
+        println!("  {}:", theme::fg("Env credentials", t.subtext).bold());
+        for (k, v) in &ec_removed {
+            println!(
+                "    {} {} -> {}",
+                theme::fg("-", t.red),
+                theme::fg(k, t.red),
+                theme::fg(v, t.red)
+            );
+        }
+        for (k, v) in &ec_added {
+            println!(
+                "    {} {} -> {}",
+                theme::fg("+", t.green),
+                theme::fg(k, t.green),
+                theme::fg(v, t.green)
+            );
+        }
+    }
+
+    // Hooks
+    let h1: BTreeSet<&String> = p1.hooks.hooks.keys().collect();
+    let h2: BTreeSet<&String> = p2.hooks.hooks.keys().collect();
+    let hooks_added: BTreeSet<&&String> = h2.difference(&h1).collect();
+    let hooks_removed: BTreeSet<&&String> = h1.difference(&h2).collect();
+    // Check for hooks present in both but with different config
+    let hooks_changed: Vec<&String> = h1
+        .intersection(&h2)
+        .filter(|k| {
+            let a = &p1.hooks.hooks[**k];
+            let b = &p2.hooks.hooks[**k];
+            a.event != b.event || a.matcher != b.matcher || a.script != b.script
+        })
+        .copied()
+        .collect();
+    if !hooks_added.is_empty() || !hooks_removed.is_empty() || !hooks_changed.is_empty() {
+        any_diff = true;
+        println!();
+        println!("  {}:", theme::fg("Hooks", t.subtext).bold());
+        for h in &hooks_removed {
+            println!("    {} {}", theme::fg("-", t.red), theme::fg(h, t.red));
+        }
+        for h in &hooks_added {
+            println!("    {} {}", theme::fg("+", t.green), theme::fg(h, t.green));
+        }
+        for h in &hooks_changed {
+            println!(
+                "    {} {} (changed)",
+                theme::fg("~", t.yellow),
+                theme::fg(h, t.yellow)
+            );
+        }
+    }
+
+    // Custom credentials
+    let cc1: BTreeSet<&String> = p1.network.custom_credentials.keys().collect();
+    let cc2: BTreeSet<&String> = p2.network.custom_credentials.keys().collect();
+    let cc_added: BTreeSet<&&String> = cc2.difference(&cc1).collect();
+    let cc_removed: BTreeSet<&&String> = cc1.difference(&cc2).collect();
+    let cc_changed: Vec<&String> = cc1
+        .intersection(&cc2)
+        .filter(|k| p1.network.custom_credentials[**k] != p2.network.custom_credentials[**k])
+        .copied()
+        .collect();
+    if !cc_added.is_empty() || !cc_removed.is_empty() || !cc_changed.is_empty() {
+        any_diff = true;
+        println!();
+        println!(
+            "  {}:",
+            theme::fg("Custom credentials", t.subtext).bold()
+        );
+        for c in &cc_removed {
+            println!("    {} {}", theme::fg("-", t.red), theme::fg(c, t.red));
+        }
+        for c in &cc_added {
+            println!("    {} {}", theme::fg("+", t.green), theme::fg(c, t.green));
+        }
+        for c in &cc_changed {
+            let old = &p1.network.custom_credentials[*c];
+            let new = &p2.network.custom_credentials[*c];
+            println!(
+                "    {} {} (changed)",
+                theme::fg("~", t.yellow),
+                theme::fg(c, t.yellow)
+            );
+            if old.upstream != new.upstream {
+                println!(
+                    "      {} upstream: {}",
+                    theme::fg("-", t.red),
+                    theme::fg(&old.upstream, t.red)
+                );
+                println!(
+                    "      {} upstream: {}",
+                    theme::fg("+", t.green),
+                    theme::fg(&new.upstream, t.green)
+                );
+            }
+            if old.credential_key != new.credential_key {
+                println!(
+                    "      {} credential_key: {}",
+                    theme::fg("-", t.red),
+                    theme::fg(&old.credential_key, t.red)
+                );
+                println!(
+                    "      {} credential_key: {}",
+                    theme::fg("+", t.green),
+                    theme::fg(&new.credential_key, t.green)
+                );
+            }
+            if old.inject_mode != new.inject_mode {
+                println!(
+                    "      {} inject_mode: {:?}",
+                    theme::fg("-", t.red),
+                    old.inject_mode
+                );
+                println!(
+                    "      {} inject_mode: {:?}",
+                    theme::fg("+", t.green),
+                    new.inject_mode
+                );
+            }
+            if old.inject_header != new.inject_header {
+                println!(
+                    "      {} inject_header: {}",
+                    theme::fg("-", t.red),
+                    theme::fg(&old.inject_header, t.red)
+                );
+                println!(
+                    "      {} inject_header: {}",
+                    theme::fg("+", t.green),
+                    theme::fg(&new.inject_header, t.green)
+                );
+            }
+            if old.credential_format != new.credential_format {
+                println!(
+                    "      {} credential_format: {}",
+                    theme::fg("-", t.red),
+                    theme::fg(&old.credential_format, t.red)
+                );
+                println!(
+                    "      {} credential_format: {}",
+                    theme::fg("+", t.green),
+                    theme::fg(&new.credential_format, t.green)
+                );
+            }
+            if old.path_pattern != new.path_pattern {
+                println!(
+                    "      {} path_pattern: {:?}",
+                    theme::fg("-", t.red),
+                    old.path_pattern
+                );
+                println!(
+                    "      {} path_pattern: {:?}",
+                    theme::fg("+", t.green),
+                    new.path_pattern
+                );
+            }
+            if old.path_replacement != new.path_replacement {
+                println!(
+                    "      {} path_replacement: {:?}",
+                    theme::fg("-", t.red),
+                    old.path_replacement
+                );
+                println!(
+                    "      {} path_replacement: {:?}",
+                    theme::fg("+", t.green),
+                    new.path_replacement
+                );
+            }
+            if old.query_param_name != new.query_param_name {
+                println!(
+                    "      {} query_param_name: {:?}",
+                    theme::fg("-", t.red),
+                    old.query_param_name
+                );
+                println!(
+                    "      {} query_param_name: {:?}",
+                    theme::fg("+", t.green),
+                    new.query_param_name
+                );
+            }
+            if old.env_var != new.env_var {
+                println!(
+                    "      {} env_var: {:?}",
+                    theme::fg("-", t.red),
+                    old.env_var
+                );
+                println!(
+                    "      {} env_var: {:?}",
+                    theme::fg("+", t.green),
+                    new.env_var
+                );
+            }
+        }
+    }
+
     if !any_diff {
         println!();
         println!("  {}", theme::fg("(no differences)", t.subtext));
     }
 
     Ok(())
+}
+
+/// Print a diff for an optional scalar field. Returns true if there was a difference.
+fn diff_scalar_option(
+    label: &str,
+    v1: &Option<String>,
+    v2: &Option<String>,
+    t: &theme::Theme,
+) -> bool {
+    if v1 == v2 {
+        return false;
+    }
+    println!();
+    println!("  {}:", theme::fg(label, t.subtext).bold());
+    if let Some(ref old) = v1 {
+        println!(
+            "    {}",
+            theme::fg(&format!("- {old}"), t.red)
+        );
+    }
+    if let Some(ref new) = v2 {
+        println!(
+            "    {}",
+            theme::fg(&format!("+ {new}"), t.green)
+        );
+    }
+    true
 }
 
 fn diff_string_vecs<'a>(
@@ -940,12 +1370,32 @@ fn diff_to_json(name1: &str, name2: &str, p1: &Profile, p2: &Profile) -> serde_j
     let groups_added: Vec<&str> = g2.difference(&g1).copied().collect();
     let groups_removed: Vec<&str> = g1.difference(&g2).copied().collect();
 
+    let diff_vec = |v1: &[String], v2: &[String]| -> serde_json::Value {
+        let s1: BTreeSet<&str> = v1.iter().map(|s| s.as_str()).collect();
+        let s2: BTreeSet<&str> = v2.iter().map(|s| s.as_str()).collect();
+        let added: Vec<&str> = s2.difference(&s1).copied().collect();
+        let removed: Vec<&str> = s1.difference(&s2).copied().collect();
+        serde_json::json!({ "added": added, "removed": removed })
+    };
+
+    let ou1 = p1.open_urls.as_ref();
+    let ou2 = p2.open_urls.as_ref();
+
     serde_json::json!({
         "profile1": name1,
         "profile2": name2,
         "groups": {
             "added": groups_added,
             "removed": groups_removed,
+        },
+        "allowed_commands": diff_vec(
+            &p1.security.allowed_commands,
+            &p2.security.allowed_commands,
+        ),
+        "capability_elevation": {
+            "profile1": p1.security.capability_elevation,
+            "profile2": p2.security.capability_elevation,
+            "changed": p1.security.capability_elevation != p2.security.capability_elevation,
         },
         "filesystem": diff_fs_json(&p1.filesystem, &p2.filesystem),
         "workdir": {
@@ -964,6 +1414,52 @@ fn diff_to_json(name1: &str, name2: &str, p1: &Profile, p2: &Profile) -> serde_j
                 "profile2": p2.network.resolved_network_profile(),
                 "changed": p1.network.resolved_network_profile() != p2.network.resolved_network_profile(),
             },
+            "proxy_allow": diff_vec(&p1.network.proxy_allow, &p2.network.proxy_allow),
+            "proxy_credentials": diff_vec(&p1.network.proxy_credentials, &p2.network.proxy_credentials),
+            "port_allow": {
+                "profile1": p1.network.port_allow,
+                "profile2": p2.network.port_allow,
+                "changed": p1.network.port_allow != p2.network.port_allow,
+            },
+            "external_proxy": {
+                "profile1": p1.network.external_proxy,
+                "profile2": p2.network.external_proxy,
+                "changed": p1.network.external_proxy != p2.network.external_proxy,
+            },
+            "external_proxy_bypass": diff_vec(
+                &p1.network.external_proxy_bypass,
+                &p2.network.external_proxy_bypass,
+            ),
+            "custom_credentials": diff_custom_credentials_json(
+                &p1.network.custom_credentials,
+                &p2.network.custom_credentials,
+            ),
+        },
+        "env_credentials": {
+            "profile1": p1.env_credentials.mappings,
+            "profile2": p2.env_credentials.mappings,
+            "changed": p1.env_credentials.mappings != p2.env_credentials.mappings,
+        },
+        "hooks": diff_hooks_json(&p1.hooks.hooks, &p2.hooks.hooks),
+        "rollback": {
+            "exclude_patterns": diff_vec(&p1.rollback.exclude_patterns, &p2.rollback.exclude_patterns),
+            "exclude_globs": diff_vec(&p1.rollback.exclude_globs, &p2.rollback.exclude_globs),
+        },
+        "open_urls": {
+            "allow_origins": diff_vec(
+                &ou1.map(|u| u.allow_origins.clone()).unwrap_or_default(),
+                &ou2.map(|u| u.allow_origins.clone()).unwrap_or_default(),
+            ),
+            "allow_localhost": {
+                "profile1": ou1.is_some_and(|u| u.allow_localhost),
+                "profile2": ou2.is_some_and(|u| u.allow_localhost),
+                "changed": ou1.is_some_and(|u| u.allow_localhost) != ou2.is_some_and(|u| u.allow_localhost),
+            },
+        },
+        "allow_launch_services": {
+            "profile1": p1.allow_launch_services,
+            "profile2": p2.allow_launch_services,
+            "changed": p1.allow_launch_services != p2.allow_launch_services,
         },
     })
 }
@@ -990,20 +1486,169 @@ fn diff_fs_json(
     })
 }
 
+fn diff_hooks_json(
+    h1: &std::collections::HashMap<String, profile::HookConfig>,
+    h2: &std::collections::HashMap<String, profile::HookConfig>,
+) -> serde_json::Value {
+    let added: Vec<&String> = h2.keys().filter(|k| !h1.contains_key(*k)).collect();
+    let removed: Vec<&String> = h1.keys().filter(|k| !h2.contains_key(*k)).collect();
+    let changed: Vec<&String> = h1
+        .keys()
+        .filter(|k| {
+            h2.get(*k).is_some_and(|v2| {
+                let v1 = &h1[*k];
+                v1.event != v2.event || v1.matcher != v2.matcher || v1.script != v2.script
+            })
+        })
+        .collect();
+
+    let mut changed_details = serde_json::Map::new();
+    for k in &changed {
+        let old = &h1[*k];
+        let new = &h2[*k];
+        let mut detail = serde_json::Map::new();
+        if old.event != new.event {
+            detail.insert(
+                "event".into(),
+                serde_json::json!({"profile1": old.event, "profile2": new.event}),
+            );
+        }
+        if old.matcher != new.matcher {
+            detail.insert(
+                "matcher".into(),
+                serde_json::json!({"profile1": old.matcher, "profile2": new.matcher}),
+            );
+        }
+        if old.script != new.script {
+            detail.insert(
+                "script".into(),
+                serde_json::json!({"profile1": old.script, "profile2": new.script}),
+            );
+        }
+        changed_details.insert((*k).clone(), serde_json::Value::Object(detail));
+    }
+
+    serde_json::json!({
+        "added": added,
+        "removed": removed,
+        "changed": changed_details,
+    })
+}
+
+fn diff_custom_credentials_json(
+    cc1: &std::collections::HashMap<String, profile::CustomCredentialDef>,
+    cc2: &std::collections::HashMap<String, profile::CustomCredentialDef>,
+) -> serde_json::Value {
+    let added: Vec<&String> = cc2
+        .keys()
+        .filter(|k| !cc1.contains_key(*k))
+        .collect();
+    let removed: Vec<&String> = cc1
+        .keys()
+        .filter(|k| !cc2.contains_key(*k))
+        .collect();
+    let changed: Vec<&String> = cc1
+        .keys()
+        .filter(|k| cc2.get(*k).is_some_and(|v2| cc1[*k] != *v2))
+        .collect();
+
+    let mut changed_details = serde_json::Map::new();
+    for k in &changed {
+        let old = &cc1[*k];
+        let new = &cc2[*k];
+        let mut detail = serde_json::Map::new();
+        if old.upstream != new.upstream {
+            detail.insert(
+                "upstream".into(),
+                serde_json::json!({"profile1": old.upstream, "profile2": new.upstream}),
+            );
+        }
+        if old.credential_key != new.credential_key {
+            detail.insert(
+                "credential_key".into(),
+                serde_json::json!({"profile1": old.credential_key, "profile2": new.credential_key}),
+            );
+        }
+        if old.inject_mode != new.inject_mode {
+            detail.insert(
+                "inject_mode".into(),
+                serde_json::json!({"profile1": format!("{:?}", old.inject_mode), "profile2": format!("{:?}", new.inject_mode)}),
+            );
+        }
+        if old.inject_header != new.inject_header {
+            detail.insert(
+                "inject_header".into(),
+                serde_json::json!({"profile1": old.inject_header, "profile2": new.inject_header}),
+            );
+        }
+        if old.credential_format != new.credential_format {
+            detail.insert(
+                "credential_format".into(),
+                serde_json::json!({"profile1": old.credential_format, "profile2": new.credential_format}),
+            );
+        }
+        if old.path_pattern != new.path_pattern {
+            detail.insert(
+                "path_pattern".into(),
+                serde_json::json!({"profile1": old.path_pattern, "profile2": new.path_pattern}),
+            );
+        }
+        if old.path_replacement != new.path_replacement {
+            detail.insert(
+                "path_replacement".into(),
+                serde_json::json!({"profile1": old.path_replacement, "profile2": new.path_replacement}),
+            );
+        }
+        if old.query_param_name != new.query_param_name {
+            detail.insert(
+                "query_param_name".into(),
+                serde_json::json!({"profile1": old.query_param_name, "profile2": new.query_param_name}),
+            );
+        }
+        if old.env_var != new.env_var {
+            detail.insert(
+                "env_var".into(),
+                serde_json::json!({"profile1": old.env_var, "profile2": new.env_var}),
+            );
+        }
+        changed_details.insert((*k).clone(), serde_json::Value::Object(detail));
+    }
+
+    serde_json::json!({
+        "added": added,
+        "removed": removed,
+        "changed": changed_details,
+    })
+}
+
 // ---------------------------------------------------------------------------
 // nono policy validate
 // ---------------------------------------------------------------------------
+
+fn classify_profile_error(e: &NonoError) -> &'static str {
+    match e {
+        NonoError::ProfileParse(msg) if msg.starts_with("expected") || msg.contains("line ") || msg.contains("column ") || msg.contains("EOF") => {
+            "JSON syntax error"
+        }
+        NonoError::ProfileParse(_) => "Profile error",
+        NonoError::ProfileRead { .. } => "File read error",
+        NonoError::ProfileInheritance(_) => "Inheritance error",
+        NonoError::ProfileNotFound(_) => "Profile not found",
+        _ => "Error",
+    }
+}
 
 fn cmd_validate(args: PolicyValidateArgs) -> Result<()> {
     let pol = policy::load_embedded_policy()?;
     let mut errors: Vec<String> = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
 
-    // Step 1: Parse JSON
+    // Step 1: Load profile (parse JSON + resolve inheritance)
     let profile = match profile::load_profile_from_path(&args.file) {
         Ok(p) => Some(p),
         Err(e) => {
-            errors.push(format!("JSON parse error: {}", e));
+            let label = classify_profile_error(&e);
+            errors.push(format!("{}: {}", label, e));
             None
         }
     };
@@ -1016,14 +1661,7 @@ fn cmd_validate(args: PolicyValidateArgs) -> Result<()> {
             }
         }
 
-        // Step 3: Check extends target
-        if let Some(ref extends) = profile.extends {
-            if profile::load_profile(extends).is_err() {
-                errors.push(format!("Extends target '{}' not found", extends));
-            }
-        }
-
-        // Step 4: Check exclude_groups
+        // Step 3: Check exclude_groups
         for excl in &profile.policy.exclude_groups {
             if let Some(group) = pol.groups.get(excl) {
                 if group.required {
@@ -1077,16 +1715,6 @@ fn cmd_validate(args: PolicyValidateArgs) -> Result<()> {
     }
 
     if let Some(ref profile) = profile {
-        if let Some(ref extends) = profile.extends {
-            if profile::load_profile(extends).is_ok() {
-                println!(
-                    "  {}  Extends '{}' found",
-                    theme::fg("[ok]", t.green),
-                    extends
-                );
-            }
-        }
-
         let valid_groups = profile
             .security
             .groups
