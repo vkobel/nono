@@ -26,9 +26,9 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Linux x86_64 (glibc)
+          # Linux x86_64 (glibc) - use 22.04 for broader GLIBC compatibility
           - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            os: ubuntu-22.04
             artifact: nono
 
           # macOS x86_64 (Intel)
