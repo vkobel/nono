@@ -4,7 +4,7 @@
 //! claude-code, openclaw, and opencode. They can be built-in (compiled
 //! into the binary) or user-defined (in ~/.config/nono/profiles/).
 
-mod builtin;
+pub(crate) mod builtin;
 
 use nono::{NonoError, Result};
 use serde::{Deserialize, Deserializer};
@@ -1263,7 +1263,6 @@ pub fn expand_vars(path: &str, workdir: &Path) -> Result<PathBuf> {
 }
 
 /// List available profiles (built-in + user)
-#[allow(dead_code)]
 pub fn list_profiles() -> Vec<String> {
     let mut profiles = builtin::list_builtin();
 
