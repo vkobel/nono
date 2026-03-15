@@ -247,12 +247,28 @@ Claude Code reads git configuration for repository operations. The built-in prof
 
 ## Secretive (SSH Keys in Secure Enclave)
 
-If you use [Secretive](https://github.com/maxgoedjen/secretive) to store SSH keys in the macOS Secure Enclave, git commit signing (`git commit -S`) needs access to the Secretive agent socket. A community profile is provided at `data/profiles/claude-code-secretive.toml`.
+If you use [Secretive](https://github.com/maxgoedjen/secretive) to store SSH keys in the macOS Secure Enclave, git commit signing (`git commit -S`) needs access to the Secretive agent socket. Create a custom profile that extends the built-in Claude Code profile:
 
-**Install the profile:**
-```bash
-mkdir -p ~/.config/nono/profiles
-cp data/profiles/claude-code-secretive.toml ~/.config/nono/profiles/
+```json
+// ~/.config/nono/profiles/claude-code-secretive.json
+{
+  "meta": {
+    "name": "claude-code-secretive",
+    "version": "1.0.0",
+    "description": "Claude Code with Secretive SSH agent support"
+  },
+  "extends": "claude-code",
+  "filesystem": {
+    "read": [
+      "$HOME/.ssh/config",
+      "$HOME/Library/Containers/com.maxgoedjen.Secretive.SecretAgent/Data/socket.ssh"
+    ],
+    "allow_file": ["$HOME/.ssh/known_hosts"]
+  },
+  "policy": {
+    "add_allow_readwrite": ["$HOME/.ssh/known_hosts"]
+  }
+}
 ```
 
 **Usage:**
@@ -261,12 +277,12 @@ nono run --profile claude-code-secretive --allow-cwd -- claude
 ```
 
 The profile extends the standard Claude Code profile with:
-- **Read access** to `~/.gitconfig` and `~/.ssh/config` (git signing configuration)
+- **Read access** to `~/.ssh/config` (git signing configuration)
 - **Read access** to the Secretive agent socket (`~/Library/Containers/com.maxgoedjen.Secretive.SecretAgent/Data/socket.ssh`)
 - **Read+write access** to `~/.ssh/known_hosts` (SSH may append new host keys)
 
 <Note>
-The Secretive socket is a Unix domain socket, not a regular file. nono v0.4+ supports granting capabilities on sockets directly, so only the socket itself is exposed — not the entire container directory.
+The Secretive socket is a Unix domain socket, not a regular file. nono supports granting capabilities on sockets directly, so only the socket itself is exposed — not the entire container directory.
 </Note>
 ## Overriding Profile Settings
 
