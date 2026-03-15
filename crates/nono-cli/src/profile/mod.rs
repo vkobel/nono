@@ -7,7 +7,7 @@
 pub(crate) mod builtin;
 
 use nono::{NonoError, Result};
-use serde::{Deserialize, Deserializer};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 pub use nono_proxy::config::InjectMode;
 
 /// Profile metadata
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[allow(dead_code)]
 pub struct ProfileMeta {
     pub name: String,
@@ -29,7 +29,7 @@ pub struct ProfileMeta {
 }
 
 /// Filesystem configuration in a profile
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FilesystemConfig {
     /// Directories with read+write access
     #[serde(default)]
@@ -55,7 +55,7 @@ pub struct FilesystemConfig {
 ///
 /// These fields provide explicit subtractive/additive composition on top of
 /// inherited groups and existing filesystem configuration.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PolicyPatchConfig {
     /// Group names to remove from the resolved group set.
     #[serde(default)]
@@ -90,7 +90,7 @@ pub struct PolicyPatchConfig {
 /// - `url_path`: Replace pattern in URL path (e.g., Telegram Bot API `/bot{}/`)
 /// - `query_param`: Add/replace query parameter (e.g., `?api_key=...`)
 /// - `basic_auth`: HTTP Basic Authentication (credential as `username:password`)
-#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CustomCredentialDef {
     /// Upstream URL to proxy requests to (e.g., "https://api.telegram.org")
     pub upstream: String,
@@ -502,6 +502,33 @@ impl<T> InheritableValue<T> {
             Self::Inherit | Self::Clear => None,
         }
     }
+
+    /// Returns `true` if this value is `Inherit` (absent in the source JSON).
+    ///
+    /// Used with `#[serde(skip_serializing_if)]` to omit inherited fields
+    /// from serialized output, preserving the distinction between absent
+    /// (inherit) and explicit null (clear).
+    pub fn is_inherit(&self) -> bool {
+        matches!(self, Self::Inherit)
+    }
+}
+
+impl<T> Serialize for InheritableValue<T>
+where
+    T: Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> std::result::Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Set(value) => value.serialize(serializer),
+            Self::Clear => serializer.serialize_none(),
+            // Inherit should be skipped via skip_serializing_if.
+            // If serialize is called anyway, emit null as a safe fallback.
+            Self::Inherit => serializer.serialize_none(),
+        }
+    }
 }
 
 impl<'de, T> Deserialize<'de> for InheritableValue<T>
@@ -520,7 +547,7 @@ where
 }
 
 /// Network configuration in a profile
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct NetworkConfig {
     /// Block network access (network allowed by default; true = blocked).
     /// Canonical profile key: `block`.
@@ -531,7 +558,7 @@ pub struct NetworkConfig {
     ///
     /// `null` explicitly clears an inherited profile value, while an absent
     /// field inherits the base profile's value.
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "InheritableValue::is_inherit")]
     pub network_profile: InheritableValue<String>,
     /// Additional hosts to allow through the proxy (on top of profile hosts).
     /// Canonical profile key: `allow_proxy` (legacy `proxy_allow` also accepted).
@@ -578,7 +605,7 @@ impl NetworkConfig {
 /// Maps keystore account names to environment variable names.
 /// Secrets are loaded from the system keystore (macOS Keychain / Linux Secret Service)
 /// under the service name "nono".
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SecretsConfig {
     /// Map of keystore account name -> environment variable name
     /// Example: { "openai_api_key" = "OPENAI_API_KEY" }
@@ -590,7 +617,7 @@ pub struct SecretsConfig {
 ///
 /// Defines hooks that nono will install for the target application.
 /// For example, Claude Code hooks are installed to ~/.claude/hooks/
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HookConfig {
     /// Event that triggers the hook (e.g., "PostToolUseFailure")
     pub event: String,
@@ -604,7 +631,7 @@ pub struct HookConfig {
 ///
 /// Maps target application names to their hook configurations.
 /// Example: [hooks.claude-code] for Claude Code hooks
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct HooksConfig {
     /// Map of target application -> hook configuration
     #[serde(flatten)]
@@ -619,7 +646,7 @@ pub struct HooksConfig {
 /// Signal isolation mode as specified in a profile.
 ///
 /// Maps to `nono::SignalMode` when building the `CapabilitySet`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProfileSignalMode {
     /// Signals restricted to the current process only
@@ -643,7 +670,7 @@ impl From<ProfileSignalMode> for nono::SignalMode {
 /// Process inspection mode as specified in a profile.
 ///
 /// Maps to `nono::ProcessInfoMode` when building the `CapabilitySet`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ProfileProcessInfoMode {
     /// Inspection restricted to self only (default)
@@ -664,7 +691,7 @@ impl From<ProfileProcessInfoMode> for nono::ProcessInfoMode {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WorkdirAccess {
     /// No automatic CWD access
@@ -679,7 +706,7 @@ pub enum WorkdirAccess {
 }
 
 /// Working directory configuration in a profile
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct WorkdirConfig {
     /// Access level for the current working directory
     #[serde(default)]
@@ -687,7 +714,7 @@ pub struct WorkdirConfig {
 }
 
 /// Security configuration referencing policy.json groups
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SecurityConfig {
     /// Policy group names to resolve (from policy.json)
     #[serde(default)]
@@ -720,7 +747,7 @@ pub struct SecurityConfig {
 /// matched against path components (exact match) or, if they contain `/`,
 /// as substrings of the full path. Glob patterns are matched against
 /// the filename (last path component).
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RollbackConfig {
     /// Patterns to exclude from rollback snapshots.
     /// Added on top of the CLI's base exclusion list.
@@ -737,7 +764,7 @@ pub struct RollbackConfig {
 /// Controls which URLs the sandboxed child can request the supervisor to
 /// open in the user's browser. Used for OAuth2 login flows and similar
 /// operations where the sandboxed process cannot launch a browser directly.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OpenUrlConfig {
     /// Allowed URL origins (scheme + host, e.g., "https://console.anthropic.com").
     /// The supervisor validates each URL open request against this list.
@@ -750,7 +777,7 @@ pub struct OpenUrlConfig {
 }
 
 /// A complete profile definition
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Profile {
     /// Optional base profile to inherit from (by name)
     #[serde(default)]
@@ -1177,7 +1204,7 @@ pub(crate) fn dedup_append<T: Eq + std::hash::Hash + Clone>(base: &[T], child: &
 }
 
 /// Get the path to a user profile
-fn get_user_profile_path(name: &str) -> Result<PathBuf> {
+pub(crate) fn get_user_profile_path(name: &str) -> Result<PathBuf> {
     let config_dir = resolve_user_config_dir()?;
 
     Ok(config_dir
@@ -1237,7 +1264,7 @@ fn home_dir() -> Result<PathBuf> {
 }
 
 /// Validate profile name (alphanumeric + hyphen only, no path traversal)
-fn is_valid_profile_name(name: &str) -> bool {
+pub(crate) fn is_valid_profile_name(name: &str) -> bool {
     !name.is_empty()
         && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
         && !name.starts_with('-')

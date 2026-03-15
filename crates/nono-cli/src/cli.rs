@@ -239,6 +239,28 @@ PLATFORM NOTES:
 ")]
     Policy(PolicyArgs),
 
+    /// Create and manage nono profiles
+    #[command(after_help = "EXAMPLES:
+    # Create a new profile with default settings
+    nono profile init my-agent
+
+    # Create a profile extending an existing one
+    nono profile init my-agent --extends default --groups deny_credentials
+
+    # Generate a full skeleton with all sections
+    nono profile init my-agent --full
+
+    # Output to a specific file
+    nono profile init my-agent --output ./my-profile.json
+
+    # Print JSON Schema for editor validation
+    nono profile schema
+
+    # Print profile authoring guide
+    nono profile guide
+")]
+    Profile(ProfileCmdArgs),
+
     /// Internal: open a URL via supervisor IPC
     #[command(hide = true)]
     OpenUrlHelper(OpenUrlHelperArgs),
@@ -326,6 +348,56 @@ pub struct PolicyValidateArgs {
     #[arg(long)]
     pub json: bool,
 }
+
+#[derive(Parser, Debug)]
+pub struct ProfileCmdArgs {
+    #[command(subcommand)]
+    pub command: ProfileCommands,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ProfileCommands {
+    /// Generate a skeleton profile JSON file
+    Init(ProfileInitArgs),
+    /// Output the JSON Schema for profile files
+    Schema(ProfileSchemaArgs),
+    /// Print the profile authoring guide
+    Guide(ProfileGuideArgs),
+}
+
+#[derive(Parser, Debug)]
+pub struct ProfileInitArgs {
+    /// Profile name (alphanumeric + hyphens)
+    pub name: String,
+    /// Base profile to extend
+    #[arg(long)]
+    pub extends: Option<String>,
+    /// Security groups to include (comma-separated)
+    #[arg(long, value_delimiter = ',')]
+    pub groups: Vec<String>,
+    /// Profile description
+    #[arg(long)]
+    pub description: Option<String>,
+    /// Generate a full skeleton with all sections
+    #[arg(long)]
+    pub full: bool,
+    /// Output file path (default: ~/.config/nono/profiles/<name>.json)
+    #[arg(long, short)]
+    pub output: Option<PathBuf>,
+    /// Overwrite existing file
+    #[arg(long)]
+    pub force: bool,
+}
+
+#[derive(Parser, Debug)]
+pub struct ProfileSchemaArgs {
+    /// Write schema to a file instead of stdout
+    #[arg(long, short)]
+    pub output: Option<PathBuf>,
+}
+
+#[derive(Parser, Debug)]
+pub struct ProfileGuideArgs {}
 
 #[derive(Parser, Debug, Clone, Default)]
 pub struct SandboxArgs {
@@ -1664,5 +1736,115 @@ mod tests {
             }
             _ => panic!("Expected Run command"),
         }
+    }
+
+    #[test]
+    fn test_profile_init_basic() {
+        let cli = Cli::parse_from(["nono", "profile", "init", "my-agent"]);
+        match cli.command {
+            Commands::Profile(args) => match args.command {
+                ProfileCommands::Init(init) => {
+                    assert_eq!(init.name, "my-agent");
+                    assert!(init.extends.is_none());
+                    assert!(init.groups.is_empty());
+                    assert!(init.description.is_none());
+                    assert!(!init.full);
+                    assert!(init.output.is_none());
+                    assert!(!init.force);
+                }
+                _ => panic!("Expected Init subcommand"),
+            },
+            _ => panic!("Expected Profile command"),
+        }
+    }
+
+    #[test]
+    fn test_profile_init_all_flags() {
+        let cli = Cli::parse_from([
+            "nono",
+            "profile",
+            "init",
+            "my-agent",
+            "--extends",
+            "default",
+            "--groups",
+            "deny_credentials,node_runtime",
+            "--description",
+            "My agent profile",
+            "--full",
+            "--output",
+            "/tmp/out.json",
+            "--force",
+        ]);
+        match cli.command {
+            Commands::Profile(args) => match args.command {
+                ProfileCommands::Init(init) => {
+                    assert_eq!(init.name, "my-agent");
+                    assert_eq!(init.extends, Some("default".to_string()));
+                    assert_eq!(init.groups, vec!["deny_credentials", "node_runtime"]);
+                    assert_eq!(init.description, Some("My agent profile".to_string()));
+                    assert!(init.full);
+                    assert_eq!(init.output, Some(std::path::PathBuf::from("/tmp/out.json")));
+                    assert!(init.force);
+                }
+                _ => panic!("Expected Init subcommand"),
+            },
+            _ => panic!("Expected Profile command"),
+        }
+    }
+
+    #[test]
+    fn test_profile_schema_default() {
+        let cli = Cli::parse_from(["nono", "profile", "schema"]);
+        match cli.command {
+            Commands::Profile(args) => match args.command {
+                ProfileCommands::Schema(schema) => {
+                    assert!(schema.output.is_none());
+                }
+                _ => panic!("Expected Schema subcommand"),
+            },
+            _ => panic!("Expected Profile command"),
+        }
+    }
+
+    #[test]
+    fn test_profile_schema_with_output() {
+        let cli = Cli::parse_from(["nono", "profile", "schema", "-o", "/tmp/schema.json"]);
+        match cli.command {
+            Commands::Profile(args) => match args.command {
+                ProfileCommands::Schema(schema) => {
+                    assert_eq!(
+                        schema.output,
+                        Some(std::path::PathBuf::from("/tmp/schema.json"))
+                    );
+                }
+                _ => panic!("Expected Schema subcommand"),
+            },
+            _ => panic!("Expected Profile command"),
+        }
+    }
+
+    #[test]
+    fn test_profile_guide() {
+        let cli = Cli::parse_from(["nono", "profile", "guide"]);
+        match cli.command {
+            Commands::Profile(args) => match args.command {
+                ProfileCommands::Guide(_) => {}
+                _ => panic!("Expected Guide subcommand"),
+            },
+            _ => panic!("Expected Profile command"),
+        }
+    }
+
+    #[test]
+    fn test_profile_init_missing_name() {
+        let result = Cli::try_parse_from(["nono", "profile", "init"]);
+        assert!(result.is_err(), "init without name should fail");
+    }
+
+    #[test]
+    fn test_profile_no_subcommand() {
+        let result = Cli::try_parse_from(["nono", "profile"]);
+        assert!(result.is_err(), "profile without subcommand should fail");
     }
 }

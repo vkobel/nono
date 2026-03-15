@@ -38,6 +38,7 @@
         "group": "Features",
         "pages": [
           "cli/features/profiles-groups",
+          "cli/features/profile-authoring",
           "cli/features/atomic-rollbacks",
           "cli/features/audit",
           "cli/features/supervisor",
