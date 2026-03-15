@@ -949,8 +949,18 @@ fn cmd_diff(args: PolicyDiffArgs) -> Result<()> {
         ),
     ]);
 
-    let port1: Vec<String> = p1.network.port_allow.iter().map(|p| p.to_string()).collect();
-    let port2: Vec<String> = p2.network.port_allow.iter().map(|p| p.to_string()).collect();
+    let port1: Vec<String> = p1
+        .network
+        .port_allow
+        .iter()
+        .map(|p| p.to_string())
+        .collect();
+    let port2: Vec<String> = p2
+        .network
+        .port_allow
+        .iter()
+        .map(|p| p.to_string())
+        .collect();
     let port_diffs = diff_string_vecs(&[("port_allow", &port1, &port2)]);
 
     if !net_diffs.is_empty() || !net_vec_diffs.is_empty() || !port_diffs.is_empty() {
@@ -1085,17 +1095,11 @@ fn cmd_diff(args: PolicyDiffArgs) -> Result<()> {
         if ou1_localhost != ou2_localhost {
             println!(
                 "    {}",
-                theme::fg(
-                    &format!("- allow_localhost: {ou1_localhost}"),
-                    t.red
-                )
+                theme::fg(&format!("- allow_localhost: {ou1_localhost}"), t.red)
             );
             println!(
                 "    {}",
-                theme::fg(
-                    &format!("+ allow_localhost: {ou2_localhost}"),
-                    t.green
-                )
+                theme::fg(&format!("+ allow_localhost: {ou2_localhost}"), t.green)
             );
         }
     }
@@ -1182,10 +1186,7 @@ fn cmd_diff(args: PolicyDiffArgs) -> Result<()> {
     if !cc_added.is_empty() || !cc_removed.is_empty() || !cc_changed.is_empty() {
         any_diff = true;
         println!();
-        println!(
-            "  {}:",
-            theme::fg("Custom credentials", t.subtext).bold()
-        );
+        println!("  {}:", theme::fg("Custom credentials", t.subtext).bold());
         for c in &cc_removed {
             println!("    {} {}", theme::fg("-", t.red), theme::fg(c, t.red));
         }
@@ -1297,11 +1298,7 @@ fn cmd_diff(args: PolicyDiffArgs) -> Result<()> {
                 );
             }
             if old.env_var != new.env_var {
-                println!(
-                    "      {} env_var: {:?}",
-                    theme::fg("-", t.red),
-                    old.env_var
-                );
+                println!("      {} env_var: {:?}", theme::fg("-", t.red), old.env_var);
                 println!(
                     "      {} env_var: {:?}",
                     theme::fg("+", t.green),
@@ -1332,16 +1329,10 @@ fn diff_scalar_option(
     println!();
     println!("  {}:", theme::fg(label, t.subtext).bold());
     if let Some(ref old) = v1 {
-        println!(
-            "    {}",
-            theme::fg(&format!("- {old}"), t.red)
-        );
+        println!("    {}", theme::fg(&format!("- {old}"), t.red));
     }
     if let Some(ref new) = v2 {
-        println!(
-            "    {}",
-            theme::fg(&format!("+ {new}"), t.green)
-        );
+        println!("    {}", theme::fg(&format!("+ {new}"), t.green));
     }
     true
 }
@@ -1539,14 +1530,8 @@ fn diff_custom_credentials_json(
     cc1: &std::collections::HashMap<String, profile::CustomCredentialDef>,
     cc2: &std::collections::HashMap<String, profile::CustomCredentialDef>,
 ) -> serde_json::Value {
-    let added: Vec<&String> = cc2
-        .keys()
-        .filter(|k| !cc1.contains_key(*k))
-        .collect();
-    let removed: Vec<&String> = cc1
-        .keys()
-        .filter(|k| !cc2.contains_key(*k))
-        .collect();
+    let added: Vec<&String> = cc2.keys().filter(|k| !cc1.contains_key(*k)).collect();
+    let removed: Vec<&String> = cc1.keys().filter(|k| !cc2.contains_key(*k)).collect();
     let changed: Vec<&String> = cc1
         .keys()
         .filter(|k| cc2.get(*k).is_some_and(|v2| cc1[*k] != *v2))
@@ -1627,7 +1612,12 @@ fn diff_custom_credentials_json(
 
 fn classify_profile_error(e: &NonoError) -> &'static str {
     match e {
-        NonoError::ProfileParse(msg) if msg.starts_with("expected") || msg.contains("line ") || msg.contains("column ") || msg.contains("EOF") => {
+        NonoError::ProfileParse(msg)
+            if msg.starts_with("expected")
+                || msg.contains("line ")
+                || msg.contains("column ")
+                || msg.contains("EOF") =>
+        {
             "JSON syntax error"
         }
         NonoError::ProfileParse(_) => "Profile error",

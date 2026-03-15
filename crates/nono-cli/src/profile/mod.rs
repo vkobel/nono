@@ -822,7 +822,9 @@ pub fn load_profile_extends(name_or_path: &str) -> Option<String> {
     // User profile
     if let Ok(profile_path) = get_user_profile_path(name_or_path) {
         if profile_path.exists() {
-            return parse_profile_file(&profile_path).ok().and_then(|p| p.extends);
+            return parse_profile_file(&profile_path)
+                .ok()
+                .and_then(|p| p.extends);
         }
     }
 
