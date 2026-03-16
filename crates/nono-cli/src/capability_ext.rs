@@ -1007,6 +1007,7 @@ mod tests {
         );
     }
 
+    #[cfg(target_os = "macos")]
     #[test]
     fn test_from_profile_policy_add_deny_access_emits_seatbelt_rules() {
         let dir = tempdir().expect("tmpdir");
