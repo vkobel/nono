@@ -805,7 +805,7 @@ fn parse_nettop_endpoint(endpoint: &str, is_ipv6: bool) -> Option<(IpAddr, u16)>
     if is_ipv6 {
         // IPv6: port is after the last '.' (nettop uses dot separator for IPv6)
         // Handle scope IDs like %en0 by stripping them first
-        let clean = if let Some(pct_pos) = endpoint.find('%') {
+        if let Some(pct_pos) = endpoint.find('%') {
             // Find the dot-port after the scope ID: "fe80::1%en0.443" -> strip "%en0"
             let after_scope = &endpoint[pct_pos..];
             if let Some(dot_pos) = after_scope.rfind('.') {
@@ -814,14 +814,12 @@ fn parse_nettop_endpoint(endpoint: &str, is_ipv6: bool) -> Option<(IpAddr, u16)>
                 return parse_addr_port_pair(addr_str, port_str);
             }
             return None;
-        } else {
-            endpoint
-        };
+        }
 
-        // Find the last '.' which separates address from port
-        let dot_pos = clean.rfind('.')?;
-        let addr_str = &clean[..dot_pos];
-        let port_str = &clean[dot_pos + 1..];
+        // No scope ID, find the last '.' which separates address from port
+        let dot_pos = endpoint.rfind('.')?;
+        let addr_str = &endpoint[..dot_pos];
+        let port_str = &endpoint[dot_pos + 1..];
         parse_addr_port_pair(addr_str, port_str)
     } else {
         // IPv4: standard addr:port format
@@ -2762,12 +2760,16 @@ mod macos_tests {
     fn test_parse_nettop_tcp6_established() {
         let no_listen = HashSet::new();
         let line = "06:54:20.707869,tcp6 fe80::73:3e64:c6b8:6476%en0.63975<->fe80::1402:4271:cc19:5e6f%en0.50715,en0,Established,1860,2955,0,0,0,22.31 ms,131072,130752,BE,-,cubic,-,-,-,-,so,";
-        // This is a link-local connection — should still parse but will be
-        // filtered out in process_network_accesses if needed
-        let access = parse_nettop_line(line, &no_listen);
-        // Link-local IPv6 with scope IDs are tricky; this tests the parser handles them
-        // The exact behavior depends on whether the scope-stripped address parses
-        assert!(access.is_some() || access.is_none()); // Parser should not panic
+        // IPv6 link-local with scope IDs — parser strips the scope ID and
+        // extracts the address and port correctly
+        let access = parse_nettop_line(line, &no_listen)
+            .expect("should parse established TCP6 with scope ID");
+        assert_eq!(
+            access.addr,
+            "fe80::1402:4271:cc19:5e6f".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(access.port, 50715);
+        assert!(matches!(access.kind, NetworkAccessKind::Connect));
     }
 
     #[test]
