@@ -717,32 +717,29 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
 
     let effective_proxy = resolve_effective_proxy_settings(&args, &prepared);
     let network_profile = effective_proxy.network_profile;
-    let proxy_allow_hosts = effective_proxy.proxy_allow_hosts;
-    let proxy_credentials = effective_proxy.proxy_credentials;
-    let mut effective_listen_ports = prepared.listen_ports.clone();
-    effective_listen_ports.extend(args.allow_bind.clone());
-    effective_listen_ports.sort_unstable();
-    effective_listen_ports.dedup();
+    let allow_domain = effective_proxy.allow_domain;
+    let credentials = effective_proxy.credentials;
+    let effective_listen_ports = merge_dedup_ports(&prepared.listen_ports, &args.allow_bind);
 
-    // Resolve effective external proxy: --allow-net clears it (same as other
+    // Resolve effective upstream proxy: --allow-net clears it (same as other
     // proxy settings), otherwise CLI overrides profile.
-    let effective_external_proxy = if args.allow_net {
+    let effective_upstream_proxy = if args.allow_net {
         None
     } else {
         args.external_proxy
             .clone()
-            .or_else(|| prepared.external_proxy.clone())
+            .or_else(|| prepared.upstream_proxy.clone())
     };
 
     // Resolve effective bypass hosts: cleared by --allow-net, otherwise
-    // CLI --external-proxy wins (use CLI bypass only), otherwise merge
+    // CLI --upstream-proxy wins (use CLI bypass only), otherwise merge
     // profile + CLI bypass hosts.
     let effective_bypass = if args.allow_net {
         Vec::new()
     } else if args.external_proxy.is_some() {
         args.external_proxy_bypass.clone()
     } else {
-        let mut bypass = prepared.external_proxy_bypass.clone();
+        let mut bypass = prepared.upstream_bypass.clone();
         bypass.extend(args.external_proxy_bypass.clone());
         bypass
     };
@@ -755,10 +752,10 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
     // network is explicitly blocked, the proxy must NOT activate since that
     // would re-enable network access through the proxy's localhost listener.
     let proxy_active = if matches!(prepared.caps.network_mode(), nono::NetworkMode::Blocked) {
-        if !proxy_credentials.is_empty()
+        if !credentials.is_empty()
             || network_profile.is_some()
-            || !proxy_allow_hosts.is_empty()
-            || effective_external_proxy.is_some()
+            || !allow_domain.is_empty()
+            || effective_upstream_proxy.is_some()
         {
             warn!(
                 "--block-net is active; ignoring proxy configuration \
@@ -776,10 +773,10 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
         matches!(
             prepared.caps.network_mode(),
             nono::NetworkMode::ProxyOnly { .. }
-        ) || !proxy_credentials.is_empty()
+        ) || !credentials.is_empty()
             || network_profile.is_some()
-            || !proxy_allow_hosts.is_empty()
-            || effective_external_proxy.is_some()
+            || !allow_domain.is_empty()
+            || effective_upstream_proxy.is_some()
     };
 
     // Split --rollback-exclude values: glob metacharacters route to filename
@@ -835,11 +832,11 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
             capability_elevation: prepared.capability_elevation,
             proxy_active,
             network_profile,
-            proxy_allow_hosts,
-            proxy_credentials,
+            allow_domain,
+            credentials,
             custom_credentials: prepared.custom_credentials,
-            external_proxy: effective_external_proxy,
-            external_proxy_bypass: effective_bypass,
+            upstream_proxy: effective_upstream_proxy,
+            upstream_bypass: effective_bypass,
             allow_bind_ports: effective_listen_ports,
             proxy_port: args.proxy_port,
             open_url_origins: prepared.open_url_origins,
@@ -952,9 +949,9 @@ fn run_wrap(wrap_args: WrapArgs, silent: bool) -> Result<()> {
     let prepared = prepare_sandbox(&args, silent)?;
 
     // Also reject proxy flags that came from the profile (not just CLI).
-    // Profile-provided external_proxy / network settings activate ProxyOnly
+    // Profile-provided upstream_proxy / network settings activate ProxyOnly
     // mode, which requires a parent process that wrap doesn't provide.
-    if prepared.external_proxy.is_some()
+    if prepared.upstream_proxy.is_some()
         || matches!(
             prepared.caps.network_mode(),
             nono::NetworkMode::ProxyOnly { .. }
@@ -1024,16 +1021,16 @@ struct ExecutionFlags {
     proxy_active: bool,
     /// Network profile name for proxy filtering (from --network-profile or profile config)
     network_profile: Option<String>,
-    /// Additional hosts to allow through the proxy (from --allow-proxy or profile config)
-    proxy_allow_hosts: Vec<String>,
-    /// Credential services for reverse proxy (from --proxy-credential or profile config)
-    proxy_credentials: Vec<String>,
+    /// Additional domains to allow through the proxy (from --allow-domain or profile config)
+    allow_domain: Vec<String>,
+    /// Credential services for reverse proxy (from --credential or profile config)
+    credentials: Vec<String>,
     /// Custom credential definitions from profile (merged with built-in during resolution)
     custom_credentials: std::collections::HashMap<String, profile::CustomCredentialDef>,
-    /// External proxy address (from --external-proxy)
-    external_proxy: Option<String>,
-    /// Hosts to bypass the external proxy (from --external-proxy-bypass)
-    external_proxy_bypass: Vec<String>,
+    /// Upstream proxy address (from --upstream-proxy)
+    upstream_proxy: Option<String>,
+    /// Hosts to bypass the upstream proxy (from --upstream-bypass)
+    upstream_bypass: Vec<String>,
     /// Ports the sandboxed process is allowed to bind (from --allow-bind)
     allow_bind_ports: Vec<u16>,
     /// Fixed port for the credential proxy (from --proxy-port)
@@ -1075,11 +1072,11 @@ impl ExecutionFlags {
             capability_elevation: false,
             proxy_active: false,
             network_profile: None,
-            proxy_allow_hosts: Vec::new(),
-            proxy_credentials: Vec::new(),
+            allow_domain: Vec::new(),
+            credentials: Vec::new(),
             custom_credentials: std::collections::HashMap::new(),
-            external_proxy: None,
-            external_proxy_bypass: Vec::new(),
+            upstream_proxy: None,
+            upstream_bypass: Vec::new(),
             allow_bind_ports: Vec::new(),
             proxy_port: None,
             open_url_origins: Vec::new(),
@@ -1097,8 +1094,8 @@ fn trust_interception_active(policy: Option<&nono::trust::TrustPolicy>) -> bool 
 #[derive(Debug, PartialEq, Eq)]
 struct EffectiveProxySettings {
     network_profile: Option<String>,
-    proxy_allow_hosts: Vec<String>,
-    proxy_credentials: Vec<String>,
+    allow_domain: Vec<String>,
+    credentials: Vec<String>,
 }
 
 fn resolve_effective_proxy_settings(
@@ -1108,8 +1105,8 @@ fn resolve_effective_proxy_settings(
     if args.allow_net {
         return EffectiveProxySettings {
             network_profile: None,
-            proxy_allow_hosts: Vec::new(),
-            proxy_credentials: Vec::new(),
+            allow_domain: Vec::new(),
+            credentials: Vec::new(),
         };
     }
 
@@ -1117,24 +1114,23 @@ fn resolve_effective_proxy_settings(
         .network_profile
         .clone()
         .or_else(|| prepared.network_profile.clone());
-    let mut proxy_allow_hosts = prepared.proxy_allow_hosts.clone();
-    proxy_allow_hosts.extend(args.allow_proxy.clone());
-    let mut proxy_credentials = prepared.proxy_credentials.clone();
-    proxy_credentials.extend(args.proxy_credential.clone());
+    let mut allow_domain = prepared.allow_domain.clone();
+    allow_domain.extend(args.allow_proxy.clone());
+    let mut credentials = prepared.credentials.clone();
+    credentials.extend(args.proxy_credential.clone());
 
     EffectiveProxySettings {
         network_profile,
-        proxy_allow_hosts,
-        proxy_credentials,
+        allow_domain,
+        credentials,
     }
 }
 
 /// Validate that bypass hosts are not specified without an external proxy.
 /// Called from both the dry-run and live execution paths.
 fn validate_external_proxy_bypass(args: &SandboxArgs, prepared: &PreparedSandbox) -> Result<()> {
-    let has_bypass =
-        !args.external_proxy_bypass.is_empty() || !prepared.external_proxy_bypass.is_empty();
-    let has_external_proxy = args.external_proxy.is_some() || prepared.external_proxy.is_some();
+    let has_bypass = !args.external_proxy_bypass.is_empty() || !prepared.upstream_bypass.is_empty();
+    let has_external_proxy = args.external_proxy.is_some() || prepared.upstream_proxy.is_some();
 
     if has_bypass && !has_external_proxy {
         return Err(NonoError::ConfigParse(
@@ -1144,6 +1140,15 @@ fn validate_external_proxy_bypass(args: &SandboxArgs, prepared: &PreparedSandbox
         ));
     }
     Ok(())
+}
+
+/// Merge two port lists, sort, and deduplicate.
+pub(crate) fn merge_dedup_ports(a: &[u16], b: &[u16]) -> Vec<u16> {
+    let mut ports = a.to_vec();
+    ports.extend_from_slice(b);
+    ports.sort_unstable();
+    ports.dedup();
+    ports
 }
 
 /// Apply sandbox pre-fork for Direct mode (both parent+child confined).
@@ -1198,7 +1203,7 @@ fn build_proxy_config_from_flags(
 
     // Merge profile credentials with CLI credentials (CLI takes precedence/adds to profile)
     let mut all_credentials = resolved.profile_credentials.clone();
-    for cred in &flags.proxy_credentials {
+    for cred in &flags.credentials {
         if !all_credentials.contains(cred) {
             all_credentials.push(cred.clone());
         }
@@ -1212,20 +1217,20 @@ fn build_proxy_config_from_flags(
     )?;
     resolved.routes = routes;
 
-    // Expand --allow-proxy entries: group names become their hosts,
+    // Expand --allow-domain entries: group names become their hosts,
     // literal hostnames pass through as-is.
-    let expanded_proxy_allow =
-        network_policy::expand_proxy_allow(&net_policy, &flags.proxy_allow_hosts);
+    let expanded_allow_domain =
+        network_policy::expand_proxy_allow(&net_policy, &flags.allow_domain);
 
     // Build the proxy config with expanded extra hosts
-    let mut proxy_config = network_policy::build_proxy_config(&resolved, &expanded_proxy_allow);
+    let mut proxy_config = network_policy::build_proxy_config(&resolved, &expanded_allow_domain);
 
-    // Wire in external proxy if specified
-    if let Some(ref addr) = flags.external_proxy {
+    // Wire in upstream proxy if specified
+    if let Some(ref addr) = flags.upstream_proxy {
         proxy_config.external_proxy = Some(nono_proxy::config::ExternalProxyConfig {
             address: addr.clone(),
             auth: None,
-            bypass_hosts: flags.external_proxy_bypass.clone(),
+            bypass_hosts: flags.upstream_bypass.clone(),
         });
     }
 
@@ -1790,16 +1795,16 @@ struct PreparedSandbox {
     rollback_exclude_globs: Vec<String>,
     /// Network profile name from profile config (if any)
     network_profile: Option<String>,
-    /// Additional proxy-allowed hosts from profile config
-    proxy_allow_hosts: Vec<String>,
+    /// Additional proxy-allowed domains from profile config
+    allow_domain: Vec<String>,
     /// Credential services from profile config
-    proxy_credentials: Vec<String>,
+    credentials: Vec<String>,
     /// Custom credential definitions from profile config
     custom_credentials: std::collections::HashMap<String, profile::CustomCredentialDef>,
-    /// External proxy address from profile config (if any)
-    external_proxy: Option<String>,
-    /// Bypass hosts for external proxy from profile config
-    external_proxy_bypass: Vec<String>,
+    /// Upstream proxy address from profile config (if any)
+    upstream_proxy: Option<String>,
+    /// Bypass hosts for upstream proxy from profile config
+    upstream_bypass: Vec<String>,
     /// TCP ports the sandboxed child may listen on from profile config
     listen_ports: Vec<u16>,
     /// Whether the profile enables runtime capability elevation (seccomp-notify + PTY)
@@ -2026,24 +2031,24 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
             .resolved_network_profile()
             .map(|value| value.to_string())
     });
-    let profile_proxy_allow = loaded_profile
+    let profile_allow_domain = loaded_profile
         .as_ref()
-        .map(|p| p.network.proxy_allow.clone())
+        .map(|p| p.network.allow_domain.clone())
         .unwrap_or_default();
-    let profile_proxy_credentials = loaded_profile
+    let profile_credentials = loaded_profile
         .as_ref()
-        .map(|p| p.network.proxy_credentials.clone())
+        .map(|p| p.network.credentials.clone())
         .unwrap_or_default();
     let profile_custom_credentials = loaded_profile
         .as_ref()
         .map(|p| p.network.custom_credentials.clone())
         .unwrap_or_default();
-    let profile_external_proxy = loaded_profile
+    let profile_upstream_proxy = loaded_profile
         .as_ref()
-        .and_then(|p| p.network.external_proxy.clone());
-    let profile_external_proxy_bypass = loaded_profile
+        .and_then(|p| p.network.upstream_proxy.clone());
+    let profile_upstream_bypass = loaded_profile
         .as_ref()
-        .map(|p| p.network.external_proxy_bypass.clone())
+        .map(|p| p.network.upstream_bypass.clone())
         .unwrap_or_default();
     let profile_listen_ports = loaded_profile
         .as_ref()
@@ -2248,7 +2253,7 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
                 };
                 eprintln!(
                     "  {}: env credential '{}' exposes the secret directly to the sandboxed process.\n\
-                     {}  For network API keys, use a profile with proxy_credentials for credential isolation.",
+                     {}  For network API keys, use a profile with credentials for credential isolation.",
                     "warning".yellow(),
                     display_account,
                     " ".repeat(11),
@@ -2280,11 +2285,11 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         rollback_exclude_patterns: profile_rollback_patterns,
         rollback_exclude_globs: profile_rollback_globs,
         network_profile: profile_network_profile,
-        proxy_allow_hosts: profile_proxy_allow,
-        proxy_credentials: profile_proxy_credentials,
+        allow_domain: profile_allow_domain,
+        credentials: profile_credentials,
         custom_credentials: profile_custom_credentials,
-        external_proxy: profile_external_proxy,
-        external_proxy_bypass: profile_external_proxy_bypass,
+        upstream_proxy: profile_upstream_proxy,
+        upstream_bypass: profile_upstream_bypass,
         listen_ports: profile_listen_ports,
         capability_elevation,
         allow_launch_services_active,
@@ -2507,11 +2512,11 @@ mod tests {
             rollback_exclude_patterns: Vec::new(),
             rollback_exclude_globs: Vec::new(),
             network_profile: Some("developer".to_string()),
-            proxy_allow_hosts: vec!["docs.python.org".to_string()],
-            proxy_credentials: vec!["github".to_string()],
+            allow_domain: vec!["docs.python.org".to_string()],
+            credentials: vec!["github".to_string()],
             custom_credentials: std::collections::HashMap::new(),
-            external_proxy: None,
-            external_proxy_bypass: Vec::new(),
+            upstream_proxy: None,
+            upstream_bypass: Vec::new(),
             listen_ports: Vec::new(),
             capability_elevation: false,
             allow_launch_services_active: false,
@@ -2526,8 +2531,8 @@ mod tests {
             effective,
             EffectiveProxySettings {
                 network_profile: None,
-                proxy_allow_hosts: Vec::new(),
-                proxy_credentials: Vec::new(),
+                allow_domain: Vec::new(),
+                credentials: Vec::new(),
             }
         );
     }
@@ -2546,11 +2551,11 @@ mod tests {
             rollback_exclude_patterns: Vec::new(),
             rollback_exclude_globs: Vec::new(),
             network_profile: Some("developer".to_string()),
-            proxy_allow_hosts: vec!["docs.python.org".to_string()],
-            proxy_credentials: vec!["github".to_string()],
+            allow_domain: vec!["docs.python.org".to_string()],
+            credentials: vec!["github".to_string()],
             custom_credentials: std::collections::HashMap::new(),
-            external_proxy: None,
-            external_proxy_bypass: Vec::new(),
+            upstream_proxy: None,
+            upstream_bypass: Vec::new(),
             listen_ports: Vec::new(),
             capability_elevation: false,
             allow_launch_services_active: false,
@@ -2565,8 +2570,8 @@ mod tests {
             effective,
             EffectiveProxySettings {
                 network_profile: Some("minimal".to_string()),
-                proxy_allow_hosts: vec!["docs.python.org".to_string(), "example.com".to_string()],
-                proxy_credentials: vec!["github".to_string(), "openai".to_string()],
+                allow_domain: vec!["docs.python.org".to_string(), "example.com".to_string()],
+                credentials: vec!["github".to_string(), "openai".to_string()],
             }
         );
     }
