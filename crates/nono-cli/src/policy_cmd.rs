@@ -555,7 +555,8 @@ fn cmd_show(args: PolicyShowArgs) -> Result<()> {
         || !net.proxy_credentials.is_empty()
         || !net.port_allow.is_empty()
         || !net.listen_port.is_empty()
-        || net.external_proxy.is_some();
+        || net.external_proxy.is_some()
+        || !net.external_proxy_bypass.is_empty();
 
     if has_net {
         println!();
@@ -605,6 +606,13 @@ fn cmd_show(args: PolicyShowArgs) -> Result<()> {
                 "    {}: {}",
                 theme::fg("upstream_proxy", t.subtext),
                 theme::fg(ep, t.text)
+            );
+        }
+        if !net.external_proxy_bypass.is_empty() {
+            println!(
+                "    {}: {}",
+                theme::fg("upstream_bypass", t.subtext),
+                net.external_proxy_bypass.join(", ")
             );
         }
     }
@@ -731,6 +739,7 @@ fn profile_to_json(
         "open_port": profile.network.port_allow,
         "listen_port": profile.network.listen_port,
         "upstream_proxy": profile.network.external_proxy,
+        "upstream_bypass": profile.network.external_proxy_bypass,
     });
 
     // Workdir

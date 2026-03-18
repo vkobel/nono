@@ -96,7 +96,10 @@ fn collect_legacy_network_warnings() -> Vec<String> {
         ("--external-proxy-bypass", Some("--upstream-bypass")),
         ("--net-block", Some("--block-net")),
     ] {
-        if args.iter().any(|arg| arg == legacy) {
+        if args
+            .iter()
+            .any(|arg| arg == legacy || arg.starts_with(&format!("{legacy}=")))
+        {
             let message = if let Some(replacement) = replacement {
                 format!("Warning: `{legacy}` is deprecated; use `{replacement}` instead.")
             } else {

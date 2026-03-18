@@ -139,15 +139,13 @@ If you want to prevent any outbound connections (e.g., for reviewing local code 
 nono run --profile claude-code --block-net -- claude
 ```
 
-### Temporarily Allow Unrestricted Network
+### Add Extra Domains
 
-If you want to keep the Claude Code profile's filesystem and command restrictions, but bypass its proxy filtering for a single session:
+If Claude Code needs to reach a domain not in the built-in network profile:
 
 ```bash
-nono run --profile claude-code --allow-net -- claude
+nono run --profile claude-code --allow-domain my-internal-api.example.com -- claude
 ```
-
-This also disables any proxy-based credential injection configured by the profile for that run.
 
 ## OAuth2 Login
 
@@ -297,8 +295,8 @@ nono run --profile claude-code --allow ~/other-project -- claude
 # Use profile but block network
 nono run --profile claude-code --block-net -- claude
 
-# Use profile but temporarily allow unrestricted network
-nono run --profile claude-code --allow-net -- claude
+# Use profile but add a custom domain
+nono run --profile claude-code --allow-domain custom-api.example.com -- claude
 ```
 
 See [Security Profiles](/cli/features/profiles-groups) for details on profile format and precedence rules.
