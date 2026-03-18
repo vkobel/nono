@@ -318,11 +318,15 @@ impl CapabilitySetExt for CapabilitySet {
         if profile.network.block {
             caps.set_network_blocked(true);
         } else if profile.network.has_proxy_flags() {
+            let mut bind_ports = profile.network.listen_port.clone();
+            bind_ports.extend(args.allow_bind.clone());
+            bind_ports.sort_unstable();
+            bind_ports.dedup();
             // Profile requests proxy mode; port 0 is a placeholder.
-            // bind_ports come from CLI args (--allow-bind).
+            // bind_ports come from profile listen_port plus CLI --listen-port.
             caps = caps.set_network_mode(nono::NetworkMode::ProxyOnly {
                 port: 0,
-                bind_ports: args.allow_bind.clone(),
+                bind_ports,
             });
         }
 

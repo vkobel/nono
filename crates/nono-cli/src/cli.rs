@@ -104,8 +104,8 @@ pub enum Commands {
     #[command(after_help = "\x1b[1mEXAMPLES\x1b[0m
   nono run --allow . claude                    # Read/write current dir, run claude
   nono run --profile claude-code claude        # Use a built-in profile
-  nono run --profile claude-code --allow-net claude
-                                               # Profile with unrestricted network
+  nono run --profile claude-code --allow-domain api.openai.com claude
+                                               # Restrict outbound access to listed domains
   nono run --read ./src --write ./output cargo build
                                                # Separate read/write permissions
   nono run --allow . --block-net cargo build   # Block network access
@@ -497,7 +497,7 @@ pub struct SandboxArgs {
     )]
     pub block_net: bool,
 
-    /// Allow unrestricted network; disables proxy filtering and credential injection
+    /// Deprecated compatibility flag. Network is unrestricted by default.
     #[arg(
         long = "allow-net",
         alias = "net-allow",
@@ -513,6 +513,7 @@ pub struct SandboxArgs {
             "external_proxy_bypass",
             "proxy_port"
         ],
+        hide = true,
         help_heading = "NETWORK"
     )]
     pub allow_net: bool,
@@ -526,37 +527,51 @@ pub struct SandboxArgs {
     )]
     pub network_profile: Option<String>,
 
-    /// Allow additional hosts through the proxy (repeatable)
+    /// Add a domain to the proxy allowlist (repeatable)
     #[arg(
-        long = "allow-proxy",
+        long = "allow-domain",
+        alias = "allow-proxy",
         alias = "proxy-allow",
-        value_name = "HOST",
+        env = "NONO_ALLOW_DOMAIN",
+        value_name = "DOMAIN",
         help_heading = "NETWORK"
     )]
     pub allow_proxy: Vec<String>,
 
-    /// Allow binding on a TCP port. macOS: enables blanket inbound (no per-port filtering)
-    #[arg(long, value_name = "PORT", help_heading = "NETWORK")]
+    /// Allow the sandboxed child to listen on a TCP port (repeatable)
+    #[arg(
+        long = "listen-port",
+        alias = "allow-bind",
+        value_name = "PORT",
+        help_heading = "NETWORK"
+    )]
     pub allow_bind: Vec<u16>,
 
-    /// Allow bidirectional TCP on a port — connect + bind (repeatable)
-    #[arg(long, value_name = "PORT", help_heading = "NETWORK")]
+    /// Allow bidirectional localhost TCP on a port: connect + listen (repeatable)
+    #[arg(
+        long = "open-port",
+        alias = "allow-port",
+        value_name = "PORT",
+        help_heading = "NETWORK"
+    )]
     pub allow_port: Vec<u16>,
 
-    /// Chain through an external proxy (host:port)
+    /// Chain outbound traffic through an upstream proxy (host:port)
     #[arg(
-        long,
+        long = "upstream-proxy",
+        alias = "external-proxy",
         value_name = "HOST:PORT",
-        env = "NONO_EXTERNAL_PROXY",
+        env = "NONO_UPSTREAM_PROXY",
         help_heading = "NETWORK"
     )]
     pub external_proxy: Option<String>,
 
-    /// Bypass external proxy for these domains (repeatable)
+    /// Route these domains direct instead of through the upstream proxy
     #[arg(
-        long,
-        value_name = "HOST",
-        env = "NONO_EXTERNAL_PROXY_BYPASS",
+        long = "upstream-bypass",
+        alias = "external-proxy-bypass",
+        value_name = "DOMAIN",
+        env = "NONO_UPSTREAM_BYPASS",
         value_delimiter = ',',
         help_heading = "NETWORK"
     )]
@@ -568,10 +583,16 @@ pub struct SandboxArgs {
 
     // ── Credentials ──────────────────────────────────────────────────────
     /// Inject credentials via reverse proxy for a service (repeatable)
-    #[arg(long, value_name = "SERVICE", help_heading = "CREDENTIALS")]
+    #[arg(
+        long = "credential",
+        alias = "proxy-credential",
+        env = "NONO_CREDENTIAL",
+        value_name = "SERVICE",
+        help_heading = "CREDENTIALS"
+    )]
     pub proxy_credential: Vec<String>,
 
-    /// Load credentials as env vars. For network API keys, prefer --proxy-credential
+    /// Load credentials as env vars. For network API keys, prefer --credential
     #[arg(
         long,
         value_name = "CREDENTIALS",
@@ -634,6 +655,174 @@ impl SandboxArgs {
             || !self.allow_proxy.is_empty()
             || !self.proxy_credential.is_empty()
             || self.external_proxy.is_some()
+    }
+}
+
+#[derive(Parser, Debug, Clone, Default)]
+pub struct WrapSandboxArgs {
+    // ── Filesystem ───────────────────────────────────────────────────────
+    /// Allow read+write access to a directory (recursive)
+    #[arg(
+        long,
+        short = 'a',
+        value_name = "DIR",
+        env = "NONO_ALLOW",
+        value_delimiter = ',',
+        help_heading = "FILESYSTEM"
+    )]
+    pub allow: Vec<PathBuf>,
+
+    /// Allow read-only access to a directory (recursive)
+    #[arg(long, short = 'r', value_name = "DIR", help_heading = "FILESYSTEM")]
+    pub read: Vec<PathBuf>,
+
+    /// Allow write-only access to a directory (recursive). Directory deletion NOT included
+    #[arg(long, short = 'w', value_name = "DIR", help_heading = "FILESYSTEM")]
+    pub write: Vec<PathBuf>,
+
+    /// Allow read+write access to a single file
+    #[arg(long, value_name = "FILE", help_heading = "FILESYSTEM")]
+    pub allow_file: Vec<PathBuf>,
+
+    /// Allow read-only access to a single file
+    #[arg(long, value_name = "FILE", help_heading = "FILESYSTEM")]
+    pub read_file: Vec<PathBuf>,
+
+    /// Allow write-only access to a single file
+    #[arg(long, value_name = "FILE", help_heading = "FILESYSTEM")]
+    pub write_file: Vec<PathBuf>,
+
+    /// Override a deny rule for a path. Pair with --allow/--read/--write grant
+    #[arg(long, value_name = "PATH", help_heading = "FILESYSTEM")]
+    pub override_deny: Vec<PathBuf>,
+
+    /// Allow CWD access without prompting (level set by profile, defaults to read-only)
+    #[arg(long, help_heading = "FILESYSTEM")]
+    pub allow_cwd: bool,
+
+    /// Working directory for $WORKDIR expansion in profiles
+    #[arg(long, value_name = "DIR", help_heading = "FILESYSTEM")]
+    pub workdir: Option<PathBuf>,
+
+    // ── Network ──────────────────────────────────────────────────────────
+    /// Block outbound network access (allowed by default)
+    #[arg(
+        long = "block-net",
+        alias = "net-block",
+        env = "NONO_BLOCK_NET",
+        value_parser = clap::builder::BoolishValueParser::new(),
+        action = clap::ArgAction::SetTrue,
+        help_heading = "NETWORK"
+    )]
+    pub block_net: bool,
+
+    /// Allow the sandboxed child to listen on a TCP port (repeatable)
+    #[arg(
+        long = "listen-port",
+        alias = "allow-bind",
+        value_name = "PORT",
+        help_heading = "NETWORK"
+    )]
+    pub allow_bind: Vec<u16>,
+
+    /// Allow bidirectional localhost TCP on a port: connect + listen (repeatable)
+    #[arg(
+        long = "open-port",
+        alias = "allow-port",
+        value_name = "PORT",
+        help_heading = "NETWORK"
+    )]
+    pub allow_port: Vec<u16>,
+
+    // ── Credentials ──────────────────────────────────────────────────────
+    /// Load credentials as env vars
+    #[arg(
+        long,
+        value_name = "CREDENTIALS",
+        env = "NONO_ENV_CREDENTIAL",
+        help_heading = "CREDENTIALS"
+    )]
+    pub env_credential: Option<String>,
+
+    /// Map a credential reference to an environment variable (repeatable)
+    #[arg(
+        long,
+        value_names = ["CREDENTIAL_REF", "ENV_VAR"],
+        num_args = 2,
+        action = clap::ArgAction::Append,
+        help_heading = "CREDENTIALS"
+    )]
+    pub env_credential_map: Vec<String>,
+
+    // ── Commands ─────────────────────────────────────────────────────────
+    /// Allow a normally-blocked dangerous command (use with caution)
+    #[arg(long, value_name = "CMD", help_heading = "COMMANDS")]
+    pub allow_command: Vec<String>,
+
+    /// Block an additional command beyond the default blocklist
+    #[arg(long, value_name = "CMD", help_heading = "COMMANDS")]
+    pub block_command: Vec<String>,
+
+    // ── General ──────────────────────────────────────────────────────────
+    /// Use a profile by name or file path
+    #[arg(
+        long,
+        short = 'p',
+        value_name = "NAME_OR_PATH",
+        env = "NONO_PROFILE",
+        help_heading = "OPTIONS"
+    )]
+    pub profile: Option<String>,
+
+    /// Allow direct LaunchServices opens on macOS (temporary login/setup flows)
+    #[arg(long, help_heading = "OPTIONS")]
+    pub allow_launch_services: bool,
+
+    /// Configuration file path
+    #[arg(long, short = 'c', value_name = "FILE", help_heading = "OPTIONS")]
+    pub config: Option<PathBuf>,
+
+    /// Enable verbose output
+    #[arg(long, short = 'v', action = clap::ArgAction::Count, help_heading = "OPTIONS")]
+    pub verbose: u8,
+
+    /// Show what would be sandboxed without executing
+    #[arg(long, help_heading = "OPTIONS")]
+    pub dry_run: bool,
+}
+
+impl From<WrapSandboxArgs> for SandboxArgs {
+    fn from(args: WrapSandboxArgs) -> Self {
+        Self {
+            allow: args.allow,
+            read: args.read,
+            write: args.write,
+            allow_file: args.allow_file,
+            read_file: args.read_file,
+            write_file: args.write_file,
+            override_deny: args.override_deny,
+            allow_cwd: args.allow_cwd,
+            workdir: args.workdir,
+            block_net: args.block_net,
+            allow_net: false,
+            network_profile: None,
+            allow_proxy: Vec::new(),
+            allow_bind: args.allow_bind,
+            allow_port: args.allow_port,
+            external_proxy: None,
+            external_proxy_bypass: Vec::new(),
+            proxy_port: None,
+            proxy_credential: Vec::new(),
+            env_credential: args.env_credential,
+            env_credential_map: args.env_credential_map,
+            allow_command: args.allow_command,
+            block_command: args.block_command,
+            profile: args.profile,
+            allow_launch_services: args.allow_launch_services,
+            config: args.config,
+            verbose: args.verbose,
+            dry_run: args.dry_run,
+        }
     }
 }
 
@@ -713,7 +902,7 @@ pub struct ShellArgs {
 #[command(disable_help_flag = true)]
 pub struct WrapArgs {
     #[command(flatten)]
-    pub sandbox: SandboxArgs,
+    pub sandbox: WrapSandboxArgs,
 
     /// Suppress diagnostic footer on command failure
     #[arg(long, help_heading = "OPTIONS")]
@@ -1215,6 +1404,72 @@ mod tests {
     }
 
     #[test]
+    fn test_wrap_supports_direct_network_flags_only() {
+        let cli = Cli::parse_from([
+            "nono",
+            "wrap",
+            "--block-net",
+            "--listen-port",
+            "3000",
+            "--open-port",
+            "5432",
+            "--allow",
+            ".",
+            "--",
+            "cargo",
+            "build",
+        ]);
+        match cli.command {
+            Commands::Wrap(args) => {
+                assert!(args.sandbox.block_net);
+                assert_eq!(args.sandbox.allow_bind, vec![3000]);
+                assert_eq!(args.sandbox.allow_port, vec![5432]);
+            }
+            _ => panic!("Expected Wrap command"),
+        }
+    }
+
+    #[test]
+    fn test_wrap_rejects_proxy_flags_at_parse_time() {
+        let result = Cli::try_parse_from([
+            "nono",
+            "wrap",
+            "--allow-domain",
+            "api.openai.com",
+            "--",
+            "echo",
+        ]);
+        assert!(
+            result.is_err(),
+            "wrap should not accept proxy filtering flags"
+        );
+    }
+
+    #[test]
+    fn test_wrap_help_hides_proxy_flags() {
+        let mut cmd = Cli::command();
+        let wrap = cmd
+            .find_subcommand_mut("wrap")
+            .expect("wrap subcommand should exist");
+
+        let mut buf = Vec::new();
+        wrap.write_long_help(&mut buf)
+            .expect("failed to write wrap help");
+        let help = String::from_utf8(buf).expect("help is not utf-8");
+
+        assert!(help.contains("--block-net"));
+        assert!(help.contains("--listen-port"));
+        assert!(help.contains("--open-port"));
+        assert!(!help.contains("--allow-domain"));
+        assert!(!help.contains("--credential"));
+        assert!(!help.contains("--network-profile"));
+        assert!(!help.contains("--upstream-proxy"));
+        assert!(!help.contains("--upstream-bypass"));
+        assert!(!help.contains("--proxy-port"));
+        assert!(!help.contains("--allow-net"));
+    }
+
+    #[test]
     fn test_shell_basic() {
         let cli = Cli::parse_from(["nono", "shell", "--allow", "."]);
         match cli.command {
@@ -1632,25 +1887,60 @@ mod tests {
     }
 
     #[test]
-    fn test_allow_net_conflicts_with_allow_proxy() {
+    fn test_allow_net_conflicts_with_allow_domain() {
         let result = Cli::try_parse_from([
             "nono",
             "run",
             "--allow",
             ".",
             "--allow-net",
-            "--allow-proxy",
+            "--allow-domain",
             "api.openai.com",
             "echo",
         ]);
         assert!(
             result.is_err(),
-            "--allow-net and --allow-proxy should conflict"
+            "--allow-net and --allow-domain should conflict"
         );
     }
 
     #[test]
-    fn test_legacy_flag_aliases_still_parse() {
+    fn test_network_flag_aliases_still_parse() {
+        let cli = Cli::parse_from([
+            "nono",
+            "run",
+            "--allow",
+            ".",
+            "--allow-domain",
+            "api.openai.com",
+            "--credential",
+            "openai",
+            "--listen-port",
+            "3000",
+            "--open-port",
+            "5432",
+            "--upstream-proxy",
+            "squid.corp:3128",
+            "--upstream-bypass",
+            "internal.corp",
+            "echo",
+            "hello",
+        ]);
+        match cli.command {
+            Commands::Run(args) => {
+                assert_eq!(args.sandbox.allow_proxy, vec!["api.openai.com"]);
+                assert_eq!(args.sandbox.proxy_credential, vec!["openai"]);
+                assert_eq!(args.sandbox.allow_bind, vec![3000]);
+                assert_eq!(args.sandbox.allow_port, vec![5432]);
+                assert_eq!(
+                    args.sandbox.external_proxy.as_deref(),
+                    Some("squid.corp:3128")
+                );
+                assert_eq!(args.sandbox.external_proxy_bypass, vec!["internal.corp"]);
+            }
+            _ => panic!("Expected Run command"),
+        }
+
         let cli = Cli::parse_from([
             "nono",
             "run",
@@ -1774,9 +2064,9 @@ mod tests {
         let cli = Cli::parse_from([
             "nono",
             "run",
-            "--allow-port",
+            "--open-port",
             "3000",
-            "--allow-port",
+            "--open-port",
             "5000",
             "--allow",
             ".",

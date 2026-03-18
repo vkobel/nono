@@ -46,10 +46,12 @@ use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 
 fn main() {
+    let legacy_network_warnings = collect_legacy_network_warnings();
     normalize_legacy_flag_env_vars();
     let cli = Cli::parse();
     init_tracing(&cli);
     init_theme(&cli);
+    print_legacy_network_warnings(&legacy_network_warnings, cli.silent);
 
     if let Err(e) = run(cli) {
         error!("{}", e);
@@ -61,6 +63,11 @@ fn main() {
 fn normalize_legacy_flag_env_vars() {
     copy_legacy_env_var("NONO_NET_BLOCK", "NONO_BLOCK_NET");
     copy_legacy_env_var("NONO_NET_ALLOW", "NONO_ALLOW_NET");
+    copy_legacy_env_var("NONO_ALLOW_PROXY", "NONO_ALLOW_DOMAIN");
+    copy_legacy_env_var("NONO_PROXY_ALLOW", "NONO_ALLOW_DOMAIN");
+    copy_legacy_env_var("NONO_PROXY_CREDENTIAL", "NONO_CREDENTIAL");
+    copy_legacy_env_var("NONO_EXTERNAL_PROXY", "NONO_UPSTREAM_PROXY");
+    copy_legacy_env_var("NONO_EXTERNAL_PROXY_BYPASS", "NONO_UPSTREAM_BYPASS");
 }
 
 fn copy_legacy_env_var(old: &str, new: &str) {
@@ -70,6 +77,61 @@ fn copy_legacy_env_var(old: &str, new: &str) {
 
     if let Some(value) = std::env::var_os(old) {
         std::env::set_var(new, value);
+    }
+}
+
+fn collect_legacy_network_warnings() -> Vec<String> {
+    let mut warnings = Vec::new();
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    for (legacy, replacement) in [
+        ("--allow-net", Some("network is unrestricted by default")),
+        ("--net-allow", Some("network is unrestricted by default")),
+        ("--allow-proxy", Some("--allow-domain")),
+        ("--proxy-allow", Some("--allow-domain")),
+        ("--proxy-credential", Some("--credential")),
+        ("--allow-bind", Some("--listen-port")),
+        ("--allow-port", Some("--open-port")),
+        ("--external-proxy", Some("--upstream-proxy")),
+        ("--external-proxy-bypass", Some("--upstream-bypass")),
+        ("--net-block", Some("--block-net")),
+    ] {
+        if args.iter().any(|arg| arg == legacy) {
+            let message = if let Some(replacement) = replacement {
+                format!("Warning: `{legacy}` is deprecated; use `{replacement}` instead.")
+            } else {
+                format!("Warning: `{legacy}` is deprecated.")
+            };
+            warnings.push(message);
+        }
+    }
+
+    for (legacy, replacement) in [
+        ("NONO_NET_BLOCK", "NONO_BLOCK_NET"),
+        ("NONO_NET_ALLOW", "NONO_ALLOW_NET"),
+        ("NONO_ALLOW_PROXY", "NONO_ALLOW_DOMAIN"),
+        ("NONO_PROXY_ALLOW", "NONO_ALLOW_DOMAIN"),
+        ("NONO_PROXY_CREDENTIAL", "NONO_CREDENTIAL"),
+        ("NONO_EXTERNAL_PROXY", "NONO_UPSTREAM_PROXY"),
+        ("NONO_EXTERNAL_PROXY_BYPASS", "NONO_UPSTREAM_BYPASS"),
+    ] {
+        if std::env::var_os(legacy).is_some() {
+            warnings.push(format!(
+                "Warning: `{legacy}` is deprecated; use `{replacement}` instead."
+            ));
+        }
+    }
+
+    warnings
+}
+
+fn print_legacy_network_warnings(warnings: &[String], silent: bool) {
+    if silent {
+        return;
+    }
+
+    for warning in warnings {
+        eprintln!("  [nono] {warning}");
     }
 }
 
@@ -654,6 +716,10 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
     let network_profile = effective_proxy.network_profile;
     let proxy_allow_hosts = effective_proxy.proxy_allow_hosts;
     let proxy_credentials = effective_proxy.proxy_credentials;
+    let mut effective_listen_ports = prepared.listen_ports.clone();
+    effective_listen_ports.extend(args.allow_bind.clone());
+    effective_listen_ports.sort_unstable();
+    effective_listen_ports.dedup();
 
     // Resolve effective external proxy: --allow-net clears it (same as other
     // proxy settings), otherwise CLI overrides profile.
@@ -771,7 +837,7 @@ fn run_sandbox(run_args: RunArgs, silent: bool) -> Result<()> {
             custom_credentials: prepared.custom_credentials,
             external_proxy: effective_external_proxy,
             external_proxy_bypass: effective_bypass,
-            allow_bind_ports: args.allow_bind,
+            allow_bind_ports: effective_listen_ports,
             proxy_port: args.proxy_port,
             open_url_origins: prepared.open_url_origins,
             open_url_allow_localhost: prepared.open_url_allow_localhost,
@@ -856,24 +922,9 @@ fn run_shell(args: ShellArgs, silent: bool) -> Result<()> {
 /// Apply sandbox and exec into command (nono disappears).
 /// For scripts, piping, and embedding where no parent process is wanted.
 fn run_wrap(wrap_args: WrapArgs, silent: bool) -> Result<()> {
-    let args = wrap_args.sandbox;
+    let args: SandboxArgs = wrap_args.sandbox.into();
     let command = wrap_args.command;
     let no_diagnostics = wrap_args.no_diagnostics;
-
-    // Validate: proxy flags are incompatible with Direct mode (no parent to run proxy)
-    if args.network_profile.is_some()
-        || !args.allow_proxy.is_empty()
-        || !args.proxy_credential.is_empty()
-        || args.external_proxy.is_some()
-        || !args.external_proxy_bypass.is_empty()
-    {
-        return Err(NonoError::ConfigParse(
-            "nono wrap does not support proxy flags (--network-profile, --allow-proxy, \
-             --proxy-credential, --external-proxy, --external-proxy-bypass). \
-             Use `nono run` instead."
-                .to_string(),
-        ));
-    }
 
     if command.is_empty() {
         return Err(NonoError::NoCommand);
@@ -1084,8 +1135,8 @@ fn validate_external_proxy_bypass(args: &SandboxArgs, prepared: &PreparedSandbox
 
     if has_bypass && !has_external_proxy {
         return Err(NonoError::ConfigParse(
-            "--external-proxy-bypass requires --external-proxy \
-             (or external_proxy in profile network config)"
+            "--upstream-bypass requires --upstream-proxy \
+             (or upstream_proxy in profile network config)"
                 .to_string(),
         ));
     }
@@ -1746,6 +1797,8 @@ struct PreparedSandbox {
     external_proxy: Option<String>,
     /// Bypass hosts for external proxy from profile config
     external_proxy_bypass: Vec<String>,
+    /// TCP ports the sandboxed child may listen on from profile config
+    listen_ports: Vec<u16>,
     /// Whether the profile enables runtime capability elevation (seccomp-notify + PTY)
     capability_elevation: bool,
     /// Whether direct LaunchServices opens are enabled for this session.
@@ -1989,6 +2042,10 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         .as_ref()
         .map(|p| p.network.external_proxy_bypass.clone())
         .unwrap_or_default();
+    let profile_listen_ports = loaded_profile
+        .as_ref()
+        .map(|p| p.network.listen_port.clone())
+        .unwrap_or_default();
     let open_url_origins = loaded_profile
         .as_ref()
         .and_then(|p| p.open_urls.as_ref())
@@ -2225,6 +2282,7 @@ fn prepare_sandbox(args: &SandboxArgs, silent: bool) -> Result<PreparedSandbox> 
         custom_credentials: profile_custom_credentials,
         external_proxy: profile_external_proxy,
         external_proxy_bypass: profile_external_proxy_bypass,
+        listen_ports: profile_listen_ports,
         capability_elevation,
         allow_launch_services_active,
         open_url_origins,
@@ -2451,6 +2509,7 @@ mod tests {
             custom_credentials: std::collections::HashMap::new(),
             external_proxy: None,
             external_proxy_bypass: Vec::new(),
+            listen_ports: Vec::new(),
             capability_elevation: false,
             allow_launch_services_active: false,
             open_url_origins: Vec::new(),
@@ -2489,6 +2548,7 @@ mod tests {
             custom_credentials: std::collections::HashMap::new(),
             external_proxy: None,
             external_proxy_bypass: Vec::new(),
+            listen_ports: Vec::new(),
             capability_elevation: false,
             allow_launch_services_active: false,
             open_url_origins: Vec::new(),

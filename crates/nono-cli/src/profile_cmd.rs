@@ -218,12 +218,10 @@ fn build_skeleton(args: &ProfileInitArgs) -> serde_json::Value {
         // silently broadening network access. Absent = inherit from base.
         let mut network = serde_json::Map::new();
         network.insert("block".to_string(), serde_json::Value::Bool(false));
-        network.insert("proxy_allow".to_string(), serde_json::Value::Array(vec![]));
-        network.insert(
-            "proxy_credentials".to_string(),
-            serde_json::Value::Array(vec![]),
-        );
-        network.insert("port_allow".to_string(), serde_json::Value::Array(vec![]));
+        network.insert("allow_domain".to_string(), serde_json::Value::Array(vec![]));
+        network.insert("credentials".to_string(), serde_json::Value::Array(vec![]));
+        network.insert("open_port".to_string(), serde_json::Value::Array(vec![]));
+        network.insert("listen_port".to_string(), serde_json::Value::Array(vec![]));
         network.insert(
             "custom_credentials".to_string(),
             serde_json::Value::Object(serde_json::Map::new()),
@@ -558,9 +556,10 @@ mod tests {
 
         // Full network has all fields
         let full_net = full_obj["network"].as_object().expect("network object");
-        assert!(full_net.contains_key("proxy_allow"));
-        assert!(full_net.contains_key("proxy_credentials"));
-        assert!(full_net.contains_key("port_allow"));
+        assert!(full_net.contains_key("allow_domain"));
+        assert!(full_net.contains_key("credentials"));
+        assert!(full_net.contains_key("open_port"));
+        assert!(full_net.contains_key("listen_port"));
         assert!(full_net.contains_key("custom_credentials"));
     }
 }

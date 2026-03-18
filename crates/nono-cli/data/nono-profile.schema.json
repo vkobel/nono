@@ -258,49 +258,81 @@
           ],
           "description": "Network proxy profile name from network-policy.json. When set, outbound traffic is filtered through the proxy. Set to null to clear an inherited value."
         },
+        "allow_domain": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Additional domains to allow through the proxy on top of the network profile hosts."
+        },
         "proxy_allow": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Additional hosts to allow through the proxy on top of the network profile hosts."
+          "description": "Legacy alias for allow_domain."
         },
         "allow_proxy": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Alias for proxy_allow. Additional hosts to allow through the proxy."
+          "description": "Legacy alias for allow_domain."
         },
-        "proxy_credentials": {
+        "credentials": {
           "type": "array",
           "items": { "type": "string" },
           "description": "Credential service names to enable via the reverse proxy."
         },
-        "port_allow": {
+        "proxy_credentials": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Legacy alias for credentials."
+        },
+        "open_port": {
           "type": "array",
           "items": { "type": "integer" },
           "description": "Localhost TCP ports to allow bidirectional IPC (connect + bind)."
         },
+        "port_allow": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "description": "Legacy alias for open_port."
+        },
         "allow_port": {
           "type": "array",
           "items": { "type": "integer" },
-          "description": "Alias for port_allow. Localhost TCP ports to allow bidirectional IPC."
+          "description": "Legacy alias for open_port."
+        },
+        "listen_port": {
+          "type": "array",
+          "items": { "type": "integer" },
+          "description": "TCP ports the sandboxed child may listen on."
         },
         "custom_credentials": {
           "type": "object",
           "additionalProperties": {
             "$ref": "#/$defs/CustomCredentialDef"
           },
-          "description": "Custom credential definitions for services not in network-policy.json. Keys are service names used with --proxy-credential."
+          "description": "Custom credential definitions for services not in network-policy.json. Keys are service names used with --credential."
+        },
+        "upstream_proxy": {
+          "oneOf": [
+            { "type": "string" },
+            { "type": "null" }
+          ],
+          "description": "Upstream proxy address (host:port) for enterprise proxy passthrough."
         },
         "external_proxy": {
           "oneOf": [
             { "type": "string" },
             { "type": "null" }
           ],
-          "description": "External proxy address (host:port) for enterprise proxy passthrough."
+          "description": "Legacy alias for upstream_proxy."
+        },
+        "upstream_bypass": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Hosts to bypass the upstream proxy and route directly. Supports exact hostnames and wildcard suffixes (e.g., *.example.com)."
         },
         "external_proxy_bypass": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Hosts to bypass the external proxy and route directly. Supports exact hostnames and wildcard suffixes (e.g., *.example.com)."
+          "description": "Legacy alias for upstream_bypass."
         }
       }
     },
