@@ -177,7 +177,7 @@ fn collect_file_patterns(
 
     let mut builder = WalkBuilder::new(root);
     builder
-        .hidden(true) // skip hidden files/dirs
+        .hidden(false) // don't skip hidden — .claude/, .github/ contain important files
         .git_ignore(true) // respect .gitignore
         .git_global(true) // respect global gitignore
         .git_exclude(true); // respect .git/info/exclude

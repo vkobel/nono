@@ -891,7 +891,7 @@ nono trust init --key my-key --force       # Specific key, overwrite existing
 | `--force` | Overwrite existing `trust-policy.json` |
 
 <Note>
-  File discovery respects `.gitignore`, global gitignore, and `.git/info/exclude`. Common build artifact directories (`node_modules`, `target`, `.venv`, etc.) are skipped by default.
+  File discovery for `init` respects `.gitignore` to keep the generated policy clean. Hidden directories like `.claude/` and `.github/` are included. Common build artifact directories (`node_modules`, `target`, `.venv`, etc.) are skipped by default. Note: the pre-exec trust scan and `sign --all`/`verify --all` do **not** respect `.gitignore` — adding a file to `.gitignore` cannot bypass trust verification.
 </Note>
 
 ### `nono trust sign`

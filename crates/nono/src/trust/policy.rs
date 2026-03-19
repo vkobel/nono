@@ -252,11 +252,15 @@ pub fn find_instruction_files<P: AsRef<Path>>(
     let root = root.as_ref();
     let matcher = policy.instruction_matcher()?;
 
+    // Trust file discovery must NOT respect .gitignore. An attacker who adds
+    // an instruction file to .gitignore could bypass pre-exec trust enforcement.
+    // We use WalkBuilder only for its built-in directory filtering (.git/, etc.)
+    // and symlink cycle detection, not for gitignore integration.
     let walker = WalkBuilder::new(root)
         .hidden(false) // don't skip hidden — .claude/ contains instruction files
-        .git_ignore(true) // respect .gitignore
-        .git_global(true) // respect global gitignore
-        .git_exclude(true) // respect .git/info/exclude
+        .git_ignore(false) // DO NOT respect .gitignore — security boundary
+        .git_global(false) // DO NOT respect global gitignore
+        .git_exclude(false) // DO NOT respect .git/info/exclude
         .follow_links(true) // follow symlinks (symlinked SKILLS.md must not be skipped)
         .max_depth(Some(16)) // guard against very deep trees
         .build();

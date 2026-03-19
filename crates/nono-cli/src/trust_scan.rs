@@ -215,6 +215,7 @@ pub fn verify_policy_signature(policy_path: &Path) -> Result<()> {
 }
 
 /// Result of a pre-exec trust scan.
+#[derive(Debug)]
 pub struct ScanResult {
     /// Individual file verification results
     pub results: Vec<VerificationResult>,
@@ -272,6 +273,12 @@ pub fn run_pre_exec_scan(
     let files = trust::find_instruction_files(policy, scan_root)?;
     let multi_bundle = trust::multi_subject_bundle_path(scan_root);
     let has_multi_bundle = multi_bundle.exists();
+
+    // Check for literal patterns (no glob characters) that matched zero files.
+    // A missing literal file is a security concern: on macOS, there is no
+    // runtime interception, so the agent could create the file mid-session
+    // with arbitrary content and read it as if it were trusted.
+    check_missing_literal_patterns(policy, scan_root, &files, silent)?;
 
     if files.is_empty() && !has_multi_bundle {
         return Ok(ScanResult {
@@ -360,6 +367,71 @@ pub fn run_pre_exec_scan(
         blocked,
         warned,
     })
+}
+
+/// Returns true if a pattern contains glob metacharacters (`*`, `?`, `[`, `{`).
+fn is_glob_pattern(pattern: &str) -> bool {
+    pattern.contains('*') || pattern.contains('?') || pattern.contains('[') || pattern.contains('{')
+}
+
+/// Check that every literal (non-glob) pattern in the trust policy has at least
+/// one matching file on disk. A missing literal file is a security issue: on
+/// macOS there is no runtime file-open interception, so the agent could create
+/// the file mid-session with arbitrary content.
+///
+/// With `deny` enforcement, missing literal files abort startup.
+/// With `warn`/`audit` enforcement, a warning is printed.
+fn check_missing_literal_patterns(
+    policy: &TrustPolicy,
+    scan_root: &Path,
+    found_files: &[PathBuf],
+    silent: bool,
+) -> Result<()> {
+    let mut missing = Vec::new();
+
+    for pattern in &policy.instruction_patterns {
+        if is_glob_pattern(pattern) {
+            continue;
+        }
+
+        // Literal pattern — check if the file exists under scan_root
+        let expected = scan_root.join(pattern);
+        let matched = found_files.iter().any(|f| f == &expected);
+
+        if !matched && !expected.exists() {
+            missing.push(pattern.clone());
+        }
+    }
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    match policy.enforcement {
+        nono::trust::Enforcement::Deny => {
+            Err(nono::NonoError::TrustVerification {
+                path: missing.join(", "),
+                reason: format!(
+                    "literal pattern(s) in trust policy have no matching file. \
+                     Missing files could be created mid-session with untrusted content. \
+                     Remove the pattern from instruction_patterns or create and sign the file(s): {}",
+                    missing.join(", ")
+                ),
+            })
+        }
+        _ => {
+            if !silent {
+                for m in &missing {
+                    eprintln!(
+                        "  {} pattern '{}' has no matching file",
+                        "Warning:".yellow(),
+                        m
+                    );
+                }
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Verify a single instruction file against the trust policy.
@@ -1218,5 +1290,77 @@ mod tests {
         let result = run_pre_exec_scan(dir.path(), &policy, true).unwrap();
         assert!(result.should_proceed());
         assert!(result.results.is_empty());
+    }
+
+    #[test]
+    fn missing_literal_pattern_blocks_with_deny_enforcement() {
+        let dir = tempfile::tempdir().unwrap();
+        // SKILLS.md is listed in the policy but does not exist on disk
+        let policy = TrustPolicy {
+            instruction_patterns: vec!["SKILLS.md".to_string()],
+            enforcement: Enforcement::Deny,
+            ..TrustPolicy::default()
+        };
+
+        let result = run_pre_exec_scan(dir.path(), &policy, true);
+        assert!(result.is_err());
+        let err = result.unwrap_err().to_string();
+        assert!(err.contains("SKILLS.md"));
+        assert!(err.contains("no matching file"));
+    }
+
+    #[test]
+    fn missing_literal_pattern_warns_with_warn_enforcement() {
+        let dir = tempfile::tempdir().unwrap();
+        let policy = TrustPolicy {
+            instruction_patterns: vec!["SKILLS.md".to_string()],
+            enforcement: Enforcement::Warn,
+            ..TrustPolicy::default()
+        };
+
+        let result = run_pre_exec_scan(dir.path(), &policy, true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn glob_pattern_with_no_matches_does_not_block() {
+        let dir = tempfile::tempdir().unwrap();
+        // Glob pattern — absence just means "no current matches"
+        let policy = TrustPolicy {
+            instruction_patterns: vec!["SKILLS*".to_string()],
+            enforcement: Enforcement::Deny,
+            ..TrustPolicy::default()
+        };
+
+        let result = run_pre_exec_scan(dir.path(), &policy, true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn literal_pattern_present_on_disk_does_not_block() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("SKILLS.md"), "# Skills").unwrap();
+
+        let policy = TrustPolicy {
+            instruction_patterns: vec!["SKILLS.md".to_string()],
+            enforcement: Enforcement::Deny,
+            ..TrustPolicy::default()
+        };
+
+        // This will fail at verification (unsigned), not at the missing-file check.
+        // The point is: the literal check itself passes because the file exists.
+        let result = run_pre_exec_scan(dir.path(), &policy, true);
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn is_glob_pattern_classification() {
+        assert!(!is_glob_pattern("SKILLS.md"));
+        assert!(!is_glob_pattern(".claude/commands/deploy.md"));
+        assert!(is_glob_pattern("SKILLS*"));
+        assert!(is_glob_pattern("CLAUDE*.md"));
+        assert!(is_glob_pattern(".claude/**/*.md"));
+        assert!(is_glob_pattern("test[0-9].md"));
+        assert!(is_glob_pattern("{a,b}.md"));
     }
 }

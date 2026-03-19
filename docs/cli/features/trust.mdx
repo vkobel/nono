@@ -292,7 +292,9 @@ nono trust init --key my-key               # use a specific signing key
 nono trust init --force                    # overwrite existing policy
 ```
 
-File discovery respects `.gitignore`, global gitignore, and `.git/info/exclude`. Common build artifact directories (`node_modules`, `target`, `.venv`, etc.) are skipped by default. Use `--exclude-dirs` for project-specific directories not covered by `.gitignore` or the built-in list.
+File discovery for `init` respects `.gitignore` to keep the generated policy clean. Hidden directories like `.claude/` and `.github/` are included. Common build artifact directories (`node_modules`, `target`, `.venv`, etc.) are skipped by default. Use `--exclude-dirs` for project-specific directories not covered by `.gitignore` or the built-in list.
+
+Note: the pre-exec trust scan and `sign --all`/`verify --all` do **not** respect `.gitignore` — adding a file to `.gitignore` cannot bypass trust verification.
 
 ### nono trust sign
 
@@ -373,7 +375,7 @@ Every time you modify `trust-policy.json`, you must re-sign it.
 
 ## Pre-exec Scanning
 
-When `nono run` launches a command, it scans the working directory for files matching the trust policy's `instruction_patterns` before applying the sandbox. File discovery respects `.gitignore`, so files excluded by your project's `.gitignore` are not scanned:
+When `nono run` launches a command, it scans the working directory for files matching the trust policy's `instruction_patterns` before applying the sandbox. File discovery does **not** respect `.gitignore` — a file added to `.gitignore` is still subject to trust verification. This prevents an attacker from hiding a malicious instruction file by adding it to `.gitignore`:
 
 ```
 nono run --profile claude-code -- claude
@@ -398,7 +400,7 @@ nono run --profile claude-code -- claude
 
 ## Runtime Interception
 
-The pre-exec scan catches instruction files present at startup. For files that appear or change during the session, nono provides runtime interception.
+The pre-exec scan catches files present at startup. Runtime behavior differs by platform.
 
 ### Linux (seccomp-notify)
 
@@ -406,11 +408,18 @@ In [Supervised mode](/cli/features/supervisor), the seccomp-notify supervisor tr
 
 The verification result is cached by (path, inode, mtime, size) to avoid re-verifying on repeated opens. If any metadata changes, the cache entry is invalidated and verification re-runs.
 
+This means files that appear mid-session (e.g., via `curl` or `git pull`) are verified on first open. Linux provides true runtime interception.
+
 ### macOS (Seatbelt)
 
-On macOS, verified files are write-protected at the kernel level. For each file that passes the pre-exec trust scan, a literal `(deny file-write-data ...)` rule is emitted in the Seatbelt profile, making the file structurally immutable for the duration of the session.
+On macOS, trust verification is **startup-only**. The pre-exec scan verifies all files matching `instruction_patterns` that exist at launch. For each verified file, a literal `(deny file-write-data ...)` rule is emitted in the Seatbelt profile, making the file structurally immutable for the duration of the session.
 
-The pre-exec scan gates execution — if any file matching the trust policy's `instruction_patterns` fails verification, the sandbox refuses to start. The supervisor's `TrustInterceptor` handles runtime verification of files opened mid-session.
+macOS does not have syscall-level file-open interception equivalent to Linux's seccomp-notify. A file matching `instruction_patterns` that appears after the sandbox is applied (e.g., created by `curl`, `git pull`, or a dependency install) will be readable if its parent directory has read access granted. It will not be verified before the agent reads it.
+
+The macOS enforcement model provides:
+- **Integrity of verified files** — kernel-level write-protection prevents tampering
+- **Startup gating** — if any existing file fails verification, the sandbox refuses to start
+- **No runtime interception** — file existence and verification are evaluated once at startup
 
 ## GitHub Actions Integration
 
