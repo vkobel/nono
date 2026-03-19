@@ -375,11 +375,14 @@ fn is_glob_pattern(pattern: &str) -> bool {
 }
 
 /// Check that every literal (non-glob) pattern in the trust policy has at least
-/// one matching file on disk. A missing literal file is a security issue: on
-/// macOS there is no runtime file-open interception, so the agent could create
-/// the file mid-session with arbitrary content.
+/// one matching file on disk.
 ///
-/// With `deny` enforcement, missing literal files abort startup.
+/// This check only applies on macOS, where there is no runtime file-open
+/// interception. On Linux, seccomp-notify traps every `openat()` and verifies
+/// files on first open, so a missing file at startup is safely handled at
+/// runtime.
+///
+/// On macOS with `deny` enforcement, missing literal files abort startup.
 /// With `warn`/`audit` enforcement, a warning is printed.
 fn check_missing_literal_patterns(
     policy: &TrustPolicy,
@@ -387,6 +390,12 @@ fn check_missing_literal_patterns(
     found_files: &[PathBuf],
     silent: bool,
 ) -> Result<()> {
+    // On Linux, seccomp-notify provides runtime interception for files that
+    // appear mid-session, so missing files at startup are not a security issue.
+    if cfg!(target_os = "linux") {
+        return Ok(());
+    }
+
     let mut missing = Vec::new();
 
     for pattern in &policy.instruction_patterns {
@@ -408,17 +417,16 @@ fn check_missing_literal_patterns(
     }
 
     match policy.enforcement {
-        nono::trust::Enforcement::Deny => {
-            Err(nono::NonoError::TrustVerification {
-                path: missing.join(", "),
-                reason: format!(
-                    "literal pattern(s) in trust policy have no matching file. \
-                     Missing files could be created mid-session with untrusted content. \
-                     Remove the pattern from instruction_patterns or create and sign the file(s): {}",
-                    missing.join(", ")
-                ),
-            })
-        }
+        nono::trust::Enforcement::Deny => Err(nono::NonoError::TrustVerification {
+            path: missing.join(", "),
+            reason: format!(
+                "literal pattern(s) in trust policy have no matching file. \
+                 On macOS, missing files could be created mid-session with untrusted content \
+                 (no runtime interception). \
+                 Remove the pattern from instruction_patterns or create and sign the file(s): {}",
+                missing.join(", ")
+            ),
+        }),
         _ => {
             if !silent {
                 for m in &missing {
@@ -432,6 +440,17 @@ fn check_missing_literal_patterns(
             Ok(())
         }
     }
+}
+
+/// Public entry point for missing-literal checks, used by CLI commands
+/// (`trust verify --all`, `trust list`) to match `nono run` enforcement.
+pub fn check_missing_literals(
+    policy: &TrustPolicy,
+    scan_root: &Path,
+    found_files: &[PathBuf],
+    silent: bool,
+) -> Result<()> {
+    check_missing_literal_patterns(policy, scan_root, found_files, silent)
 }
 
 /// Verify a single instruction file against the trust policy.

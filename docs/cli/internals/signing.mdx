@@ -221,9 +221,9 @@ Attestation primitives reusable by all language bindings.
 
 ## Security Properties
 
-**Verification before ingestion.** The pre-exec scan and runtime interception both ensure the agent never sees content that failed verification. If the agent reads the file before verification completes, the injection has already succeeded.
+**Verification before ingestion.** On Linux, the pre-exec scan and seccomp-notify runtime interception together ensure the agent never sees content that failed verification — files present at startup and files that appear mid-session are both verified before the agent can read them. On macOS, verification is startup-only: files present at launch are verified, and verified files are write-protected, but files that appear mid-session are not intercepted (see [Seatbelt Write-Protection](#seatbelt-write-protection-macos) above). To mitigate this on macOS, literal patterns in the trust policy that have no matching file at startup cause a hard failure in `deny` mode.
 
-**No trust-on-first-use.** A file must have a valid signature from a trusted publisher on first encounter. TOFU creates a window where the first encounter is untrusted, which is the supply chain attack scenario this defends against.
+**No trust-on-first-use (Linux).** On Linux, a file must have a valid signature from a trusted publisher on first encounter — seccomp-notify intercepts the `openat()` syscall before the read completes. On macOS, this guarantee applies only to files present at startup.
 
 **Blocklist before crypto.** A known-malicious file is denied even if it has a valid signature. This handles the case of a legitimately-signed file that is later discovered to be malicious.
 

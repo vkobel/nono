@@ -733,6 +733,13 @@ fn run_verify(args: TrustVerifyArgs) -> Result<()> {
         }
     }
 
+    // Run the same missing-literal check that nono run uses, so
+    // `trust verify --all` surfaces the same errors as startup.
+    if args.all {
+        let cwd_for_check = std::env::current_dir().map_err(nono::NonoError::Io)?;
+        crate::trust_scan::check_missing_literals(&policy, &cwd_for_check, &files, false)?;
+    }
+
     if files.is_empty() && multi_bundles.is_empty() {
         eprintln!("No instruction files or multi-subject bundles found to verify.");
         return Ok(());
@@ -1007,6 +1014,9 @@ fn run_list(args: TrustListArgs) -> Result<()> {
 
     let cwd = std::env::current_dir().map_err(nono::NonoError::Io)?;
     let files = trust::find_instruction_files(&policy, &cwd)?;
+
+    // Surface missing-literal warnings so `trust list` matches `nono run`.
+    crate::trust_scan::check_missing_literals(&policy, &cwd, &files, false)?;
 
     if files.is_empty() {
         eprintln!("No instruction files found in current directory.");
