@@ -5,7 +5,7 @@
 //! avoids interactive keychain prompts on local machines and in CI.
 
 use nono::{NonoError, Result};
-#[cfg(unix)]
+#[cfg(all(unix, feature = "test-trust-overrides"))]
 use std::os::unix::fs::PermissionsExt;
 #[cfg(feature = "test-trust-overrides")]
 use std::path::{Path, PathBuf};
