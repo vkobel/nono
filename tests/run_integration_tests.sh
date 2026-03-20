@@ -25,10 +25,10 @@ echo ""
 # Build
 # =============================================================================
 
-echo -e "${BLUE}Building nono...${NC}"
+echo -e "${BLUE}Building nono with test trust overrides enabled...${NC}"
 cd "$PROJECT_ROOT"
 
-if ! cargo build --release 2>&1; then
+if ! cargo build --release -p nono-cli --features test-trust-overrides 2>&1; then
     echo -e "${RED}Build failed!${NC}"
     exit 1
 fi

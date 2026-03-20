@@ -7,27 +7,37 @@
 use nono::{NonoError, Result};
 #[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(feature = "test-trust-overrides")]
 use std::path::{Path, PathBuf};
 
 /// Test-only override for trust key storage.
+#[cfg(feature = "test-trust-overrides")]
 pub(crate) const TEST_KEYSTORE_DIR_ENV: &str = "NONO_TRUST_TEST_KEYSTORE_DIR";
 
 enum TrustKeyStore {
     System,
+    #[cfg(feature = "test-trust-overrides")]
     File(PathBuf),
 }
 
 impl TrustKeyStore {
     fn selected() -> Self {
+        #[cfg(feature = "test-trust-overrides")]
         match std::env::var_os(TEST_KEYSTORE_DIR_ENV) {
             Some(dir) if !dir.is_empty() => Self::File(PathBuf::from(dir)),
             _ => Self::System,
+        }
+
+        #[cfg(not(feature = "test-trust-overrides"))]
+        {
+            Self::System
         }
     }
 
     fn description(&self, service: &str) -> String {
         match self {
             Self::System => format!("system keystore (service: {service})"),
+            #[cfg(feature = "test-trust-overrides")]
             Self::File(root) => format!("test keystore directory ({})", root.display()),
         }
     }
@@ -46,6 +56,7 @@ impl TrustKeyStore {
                     ))),
                 }
             }
+            #[cfg(feature = "test-trust-overrides")]
             Self::File(root) => Ok(file_path(root, service, account).exists()),
         }
     }
@@ -65,6 +76,7 @@ impl TrustKeyStore {
                     )),
                 })
             }
+            #[cfg(feature = "test-trust-overrides")]
             Self::File(root) => {
                 let path = file_path(root, service, account);
                 std::fs::read_to_string(&path).map_err(|e| {
@@ -93,6 +105,7 @@ impl TrustKeyStore {
                     .set_password(secret)
                     .map_err(|e| NonoError::KeystoreAccess(format!("failed to store key: {e}")))
             }
+            #[cfg(feature = "test-trust-overrides")]
             Self::File(root) => {
                 let path = file_path(root, service, account);
                 if let Some(parent) = path.parent() {
@@ -127,11 +140,13 @@ impl TrustKeyStore {
     }
 }
 
+#[cfg(feature = "test-trust-overrides")]
 fn file_path(root: &Path, service: &str, account: &str) -> PathBuf {
     root.join(hex_component(service))
         .join(hex_component(account))
 }
 
+#[cfg(feature = "test-trust-overrides")]
 fn hex_component(value: &str) -> String {
     let mut encoded = String::with_capacity(value.len().saturating_mul(2));
     for byte in value.as_bytes() {
@@ -156,7 +171,7 @@ pub(crate) fn store_secret(service: &str, account: &str, secret: &str) -> Result
     TrustKeyStore::selected().store(service, account, secret)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "test-trust-overrides"))]
 mod tests {
     use super::*;
 

@@ -22,6 +22,7 @@ const TRUST_SERVICE: &str = "nono-trust";
 const TRUST_PUB_SERVICE: &str = "nono-trust-pub";
 
 /// Test-only override for the user trust policy path.
+#[cfg(feature = "test-trust-overrides")]
 pub(crate) const TEST_USER_POLICY_PATH_ENV: &str = "NONO_TRUST_TEST_USER_POLICY_PATH";
 
 /// Run a trust subcommand.
@@ -1127,18 +1128,21 @@ fn verify_policy_if_exists(policy_path: &Path) -> Result<()> {
 }
 
 pub(crate) fn user_trust_policy_path() -> Option<PathBuf> {
-    if let Some(raw_path) = std::env::var_os(TEST_USER_POLICY_PATH_ENV) {
-        if !raw_path.is_empty() {
-            let path = PathBuf::from(&raw_path);
-            if path.is_absolute() {
-                return Some(path);
-            }
+    #[cfg(feature = "test-trust-overrides")]
+    {
+        if let Some(raw_path) = std::env::var_os(TEST_USER_POLICY_PATH_ENV) {
+            if !raw_path.is_empty() {
+                let path = PathBuf::from(&raw_path);
+                if path.is_absolute() {
+                    return Some(path);
+                }
 
-            tracing::warn!(
-                "Ignoring invalid {}='{}' (must be absolute), falling back to user config dir",
-                TEST_USER_POLICY_PATH_ENV,
-                path.display()
-            );
+                tracing::warn!(
+                    "Ignoring invalid {}='{}' (must be absolute), falling back to user config dir",
+                    TEST_USER_POLICY_PATH_ENV,
+                    path.display()
+                );
+            }
         }
     }
 
@@ -1278,6 +1282,7 @@ mod tests {
         assert!(path.is_some());
     }
 
+    #[cfg(feature = "test-trust-overrides")]
     #[test]
     fn user_trust_policy_path_prefers_test_override() {
         let dir = tempfile::tempdir().unwrap();

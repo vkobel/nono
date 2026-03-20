@@ -396,8 +396,11 @@ fn check_missing_literal_patterns(
 
     let mut missing = Vec::new();
 
+    let mut has_globs = false;
+
     for pattern in &policy.includes {
         if is_glob_pattern(pattern) {
+            has_globs = true;
             continue;
         }
 
@@ -408,6 +411,23 @@ fn check_missing_literal_patterns(
         if !matched && !expected.exists() {
             missing.push(pattern.clone());
         }
+    }
+
+    if has_globs && policy.enforcement.is_blocking() && !silent {
+        eprintln!(
+            "  {}",
+            "Note: glob patterns in 'includes' only match files present at startup on macOS."
+                .yellow()
+        );
+        eprintln!(
+            "  {}",
+            "Files created mid-session matching these patterns will not be verified.".yellow()
+        );
+        eprintln!(
+            "  {}",
+            "Use literal paths for files that must always be verified, or use Linux for runtime interception."
+                .yellow()
+        );
     }
 
     if missing.is_empty() {

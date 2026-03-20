@@ -30,6 +30,11 @@ conf-files = ["/etc/nono/profiles/"]
 name = "nono"
 path = "src/main.rs"
 
+[features]
+default = []
+# Enables test-only trust root overrides used by the integration harness.
+test-trust-overrides = []
+
 [dependencies]
 nono = { version = "0.20.0", path = "../nono" }
 nono-proxy = { version = "0.20.0", path = "../nono-proxy" }
