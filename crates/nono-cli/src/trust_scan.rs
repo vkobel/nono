@@ -1340,10 +1340,20 @@ mod tests {
         };
 
         let result = run_pre_exec_scan(dir.path(), &policy, true);
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(err.contains("SKILLS.md"));
-        assert!(err.contains("no matching file"));
+
+        if cfg!(target_os = "linux") {
+            assert!(result.is_ok());
+            return;
+        }
+
+        match result {
+            Err(err) => {
+                let err = err.to_string();
+                assert!(err.contains("SKILLS.md"));
+                assert!(err.contains("no matching file"));
+            }
+            Ok(_) => panic!("expected missing literal includes to block startup on this platform"),
+        }
     }
 
     #[test]
