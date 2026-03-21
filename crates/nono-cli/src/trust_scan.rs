@@ -31,21 +31,19 @@ use std::path::{Path, PathBuf};
 /// `NonoError::TrustVerification` if signature verification fails.
 pub fn load_scan_policy(root: &Path, trust_override: bool) -> Result<TrustPolicy> {
     let cwd_policy = root.join("trust-policy.json");
+    let project_policy_path = cwd_policy.exists().then_some(cwd_policy);
 
-    let project = if cwd_policy.exists() {
-        Some(trust::load_policy_from_file(&cwd_policy)?)
+    let project = if let Some(ref policy_path) = project_policy_path {
+        Some(trust::load_policy_from_file(policy_path)?)
     } else {
         None
     };
 
     let user_path = crate::trust_cmd::user_trust_policy_path();
+    let user_policy_path = user_path.as_ref().filter(|path| path.exists());
 
-    let user = if let Some(ref path) = user_path {
-        if path.exists() {
-            Some(trust::load_policy_from_file(path)?)
-        } else {
-            None
-        }
+    let user = if let Some(path) = user_policy_path {
+        Some(trust::load_policy_from_file(path)?)
     } else {
         None
     };
@@ -79,7 +77,10 @@ pub fn load_scan_policy(root: &Path, trust_override: bool) -> Result<TrustPolicy
     }?;
 
     if !trust_override && scan_has_signed_artifacts(root, &effective)? {
-        verify_scan_policy_signatures(root)?;
+        verify_scan_policy_signatures(
+            project_policy_path.as_deref(),
+            user_policy_path.map(PathBuf::as_path),
+        )?;
     }
 
     Ok(effective)
@@ -101,17 +102,17 @@ fn scan_has_signed_artifacts(scan_root: &Path, policy: &TrustPolicy) -> Result<b
         .any(|file_path| trust::bundle_path_for(file_path).exists()))
 }
 
-/// Verify any trust policies discovered for the given scan root.
-fn verify_scan_policy_signatures(root: &Path) -> Result<()> {
-    let cwd_policy = root.join("trust-policy.json");
-    if cwd_policy.exists() {
-        verify_policy_signature(&cwd_policy)?;
+/// Verify any trust policies already discovered for the current scan.
+fn verify_scan_policy_signatures(
+    project_policy_path: Option<&Path>,
+    user_policy_path: Option<&Path>,
+) -> Result<()> {
+    if let Some(policy_path) = project_policy_path {
+        verify_policy_signature(policy_path)?;
     }
 
-    if let Some(user_path) = crate::trust_cmd::user_trust_policy_path() {
-        if user_path.exists() {
-            verify_policy_signature(&user_path)?;
-        }
+    if let Some(policy_path) = user_policy_path {
+        verify_policy_signature(policy_path)?;
     }
 
     Ok(())
@@ -1171,23 +1172,29 @@ mod tests {
     fn load_scan_policy_skips_policy_verification_without_signed_artifacts() {
         let scan_dir = tempfile::tempdir().unwrap();
         let include_pattern = "*.arbitrary";
+        let orig_xdg = std::env::var("XDG_CONFIG_HOME").ok();
+        let xdg_dir = scan_dir.path().join("xdg");
+        std::fs::create_dir_all(&xdg_dir).unwrap();
+        std::env::set_var("XDG_CONFIG_HOME", &xdg_dir);
 
-        let user_policy_path = scan_dir.path().join("trust-policy.json");
+        std::fs::write(scan_dir.path().join("notes.arbitrary"), "unsigned").unwrap();
+
+        let project_policy_path = scan_dir.path().join("trust-policy.json");
         std::fs::write(
-            &user_policy_path,
+            &project_policy_path,
             format!(
                 r#"{{"version":1,"includes":["{include_pattern}"],"publishers":[],"blocklist":{{"digests":[],"publishers":[]}},"enforcement":"warn"}}"#
             ),
         )
         .unwrap();
 
-        let key_pair = trust::generate_signing_key().unwrap();
-        let key_id = trust::key_id_hex(&key_pair).unwrap();
-        let bundle_json = trust::sign_policy_file(&user_policy_path, &key_pair, &key_id).unwrap();
-        std::fs::write(trust::bundle_path_for(&user_policy_path), bundle_json).unwrap();
-
         let policy = load_scan_policy(scan_dir.path(), false).unwrap();
         assert!(policy.includes.contains(&include_pattern.to_string()));
+
+        match orig_xdg {
+            Some(val) => std::env::set_var("XDG_CONFIG_HOME", val),
+            None => std::env::remove_var("XDG_CONFIG_HOME"),
+        }
     }
 
     #[test]
