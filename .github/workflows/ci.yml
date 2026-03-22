@@ -43,19 +43,26 @@ jobs:
             pull_request)
               base_sha="${PR_BASE_SHA}"
               head_sha="${PR_HEAD_SHA}"
+              diff_mode="merge-base"
               ;;
             push)
               base_sha="${PUSH_BEFORE_SHA}"
               head_sha="${PUSH_HEAD_SHA}"
+              diff_mode="direct"
               ;;
             *)
               base_sha=""
               head_sha=""
+              diff_mode=""
               ;;
           esac
 
           if [[ -n "${base_sha}" && -n "${head_sha}" && "${base_sha}" != "0000000000000000000000000000000000000000" ]]; then
-            mapfile -t changed_files < <(git diff --name-only "${base_sha}" "${head_sha}")
+            if [[ "${diff_mode}" == "merge-base" ]]; then
+              mapfile -t changed_files < <(git diff --name-only "${base_sha}...${head_sha}")
+            else
+              mapfile -t changed_files < <(git diff --name-only "${base_sha}" "${head_sha}")
+            fi
 
             if [[ ${#changed_files[@]} -gt 0 ]]; then
               run_code_jobs=false
