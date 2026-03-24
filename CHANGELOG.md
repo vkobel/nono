@@ -1,5 +1,33 @@
 # Changelog
 
+## [0.23.0] - 2026-03-24
+
+### Dependencies
+
+- *(deps)* Bump toml from 1.0.3+spec-1.1.0 to 1.0.6+spec-1.1.0 (#479) ([#479](https://github.com/always-further/nono/pull/479))
+
+- *(deps)* Bump which from 8.0.0 to 8.0.2 (#478) ([#478](https://github.com/always-further/nono/pull/478))
+
+- *(deps)* Bump aws-lc-rs from 1.16.1 to 1.16.2 (#477) ([#477](https://github.com/always-further/nono/pull/477))
+
+- *(deps)* Bump mislav/bump-homebrew-formula-action from 3.6 to 4.1 (#476) ([#476](https://github.com/always-further/nono/pull/476))
+
+- *(deps)* Bump actions/cache from 5.0.3 to 5.0.4 (#474) ([#474](https://github.com/always-further/nono/pull/474))
+
+- *(deps)* Bump always-further/agent-sign from 0.0.4 to 0.0.8 (#475) ([#475](https://github.com/always-further/nono/pull/475))
+
+
+### Documentation
+
+- Remove compiled PDF, keep Typst source
+
+
+### Features
+
+- *(query)* Add diagnostic details to path query results (#472) ([#472](https://github.com/always-further/nono/pull/472))
+
+- *(cli)* Add --rollback-dest flag to override snapshot storage path
+
 ## [0.22.1] - 2026-03-23
 
 ### Build
