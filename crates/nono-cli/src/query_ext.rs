@@ -98,21 +98,6 @@ pub fn query_path(
         .iter()
         .any(|op| canonical == *op || canonical.starts_with(op));
 
-    if !is_overridden {
-        if let Some(matched) = crate::policy::matching_deny_path(&canonical, deny_paths) {
-            return Ok(QueryResult::Denied {
-                reason: "deny_path".to_string(),
-                details: Some(format!(
-                    "Path is denied by active sandbox policy: {}",
-                    matched.display()
-                )),
-                policy_source: Some(matched.display().to_string()),
-                matching_capability: None,
-                suggested_flag: None,
-            });
-        }
-    }
-
     // Check if this is a sensitive path (CLI security policy), but skip
     // the check for paths that have been explicitly overridden.
     if !is_overridden {
@@ -124,6 +109,21 @@ pub fn query_path(
                     matched
                 )),
                 policy_source: Some(matched),
+                matching_capability: None,
+                suggested_flag: None,
+            });
+        }
+    }
+
+    if !is_overridden {
+        if let Some(matched) = crate::policy::matching_deny_path(&canonical, deny_paths) {
+            return Ok(QueryResult::Denied {
+                reason: "deny_path".to_string(),
+                details: Some(format!(
+                    "Path is denied by active sandbox policy: {}",
+                    matched.display()
+                )),
+                policy_source: Some(matched.display().to_string()),
                 matching_capability: None,
                 suggested_flag: None,
             });
