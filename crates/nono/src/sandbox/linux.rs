@@ -906,10 +906,10 @@ pub fn install_seccomp_notify() -> Result<std::os::fd::OwnedFd> {
 /// `AccessNet`. It enforces a fail-closed `--block-net` policy by allowing
 /// only Unix-domain sockets and denying `socket()`, `socketpair()`, and
 /// `io_uring_setup()` attempts that could drive network I/O.
-pub fn install_seccomp_block_network() -> Result<()> {
+fn build_seccomp_block_network_filter() -> [SockFilterInsn; 10] {
     let errno_ret = SECCOMP_RET_ERRNO | (libc::EPERM as u32);
 
-    let filter = [
+    [
         SockFilterInsn {
             code: BPF_LD | BPF_W | BPF_ABS,
             jt: 0,
@@ -970,7 +970,17 @@ pub fn install_seccomp_block_network() -> Result<()> {
             jf: 0,
             k: SECCOMP_RET_ALLOW,
         },
-    ];
+    ]
+}
+
+/// Install a seccomp filter that blocks non-Unix socket creation.
+///
+/// This is a compatibility fallback for kernels whose Landlock ABI lacks
+/// `AccessNet`. It enforces a fail-closed `--block-net` policy by allowing
+/// only Unix-domain sockets and denying `socket()`, `socketpair()`, and
+/// `io_uring_setup()` attempts that could drive network I/O.
+pub fn install_seccomp_block_network() -> Result<()> {
+    let filter = build_seccomp_block_network_filter();
 
     let prog = SockFprog {
         len: filter.len() as u16,
@@ -1856,70 +1866,30 @@ mod tests {
     }
 
     #[test]
-    fn test_network_block_bpf_filter_instruction_count() {
-        let filter = [
-            SockFilterInsn {
-                code: BPF_LD | BPF_W | BPF_ABS,
-                jt: 0,
-                jf: 0,
-                k: SECCOMP_DATA_NR_OFFSET,
-            },
-            SockFilterInsn {
-                code: BPF_JMP | BPF_JEQ | BPF_K,
-                jt: 4,
-                jf: 0,
-                k: SYS_SOCKET as u32,
-            },
-            SockFilterInsn {
-                code: BPF_JMP | BPF_JEQ | BPF_K,
-                jt: 3,
-                jf: 0,
-                k: SYS_SOCKETPAIR as u32,
-            },
-            SockFilterInsn {
-                code: BPF_JMP | BPF_JEQ | BPF_K,
-                jt: 1,
-                jf: 0,
-                k: SYS_IO_URING_SETUP as u32,
-            },
-            SockFilterInsn {
-                code: BPF_RET | BPF_K,
-                jt: 0,
-                jf: 0,
-                k: SECCOMP_RET_ALLOW,
-            },
-            SockFilterInsn {
-                code: BPF_RET | BPF_K,
-                jt: 0,
-                jf: 0,
-                k: SECCOMP_RET_ERRNO | (libc::EPERM as u32),
-            },
-            SockFilterInsn {
-                code: BPF_LD | BPF_W | BPF_ABS,
-                jt: 0,
-                jf: 0,
-                k: SECCOMP_DATA_ARG0_OFFSET,
-            },
-            SockFilterInsn {
-                code: BPF_JMP | BPF_JEQ | BPF_K,
-                jt: 1,
-                jf: 0,
-                k: libc::AF_UNIX as u32,
-            },
-            SockFilterInsn {
-                code: BPF_RET | BPF_K,
-                jt: 0,
-                jf: 0,
-                k: SECCOMP_RET_ERRNO | (libc::EPERM as u32),
-            },
-            SockFilterInsn {
-                code: BPF_RET | BPF_K,
-                jt: 0,
-                jf: 0,
-                k: SECCOMP_RET_ALLOW,
-            },
-        ];
+    fn test_build_seccomp_block_network_filter() {
+        let filter = build_seccomp_block_network_filter();
+
         assert_eq!(filter.len(), 10);
+        assert_eq!(filter[0].k, SECCOMP_DATA_NR_OFFSET);
+
+        assert_eq!(filter[1].k, SYS_SOCKET as u32);
+        assert_eq!(filter[1].jt, 4);
+
+        assert_eq!(filter[2].k, SYS_SOCKETPAIR as u32);
+        assert_eq!(filter[2].jt, 3);
+
+        assert_eq!(filter[3].k, SYS_IO_URING_SETUP as u32);
+        assert_eq!(filter[3].jt, 1);
+
+        assert_eq!(filter[4].k, SECCOMP_RET_ALLOW);
+        assert_eq!(filter[5].k, SECCOMP_RET_ERRNO | (libc::EPERM as u32));
+
+        assert_eq!(filter[6].k, SECCOMP_DATA_ARG0_OFFSET);
+        assert_eq!(filter[7].k, libc::AF_UNIX as u32);
+        assert_eq!(filter[7].jt, 1);
+
+        assert_eq!(filter[8].k, SECCOMP_RET_ERRNO | (libc::EPERM as u32));
+        assert_eq!(filter[9].k, SECCOMP_RET_ALLOW);
     }
 
     #[test]
