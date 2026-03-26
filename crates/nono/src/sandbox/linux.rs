@@ -456,73 +456,81 @@ pub fn apply_with_abi(caps: &CapabilitySet, abi: &DetectedAbi) -> Result<Seccomp
         .create()
         .map_err(|e| NonoError::SandboxInit(format!("Failed to create ruleset: {}", e)))?;
 
-    // Add per-port TCP connect rules (ProxyOnly port + explicit tcp_connect_ports)
-    if let NetworkMode::ProxyOnly { port, bind_ports } = caps.network_mode() {
-        debug!("Adding ProxyOnly TCP connect rule for port {}", port);
-        ruleset = ruleset
-            .add_rule(NetPort::new(*port, AccessNet::ConnectTcp))
-            .map_err(|e| {
-                NonoError::SandboxInit(format!(
-                    "Cannot add TCP connect rule for proxy port {}: {}",
-                    port, e
-                ))
-            })?;
-        // Add per-port TCP bind rules for bind_ports in ProxyOnly mode
-        for bp in bind_ports {
-            debug!("Adding ProxyOnly TCP bind rule for port {}", bp);
-            ruleset = ruleset
-                .add_rule(NetPort::new(*bp, AccessNet::BindTcp))
-                .map_err(|e| {
-                    NonoError::SandboxInit(format!(
-                        "Cannot add TCP bind rule for port {}: {}",
-                        bp, e
-                    ))
-                })?;
-        }
-    }
-    for port in caps.tcp_connect_ports() {
-        debug!("Adding TCP connect rule for port {}", port);
-        ruleset = ruleset
-            .add_rule(NetPort::new(*port, AccessNet::ConnectTcp))
-            .map_err(|e| {
-                NonoError::SandboxInit(format!(
-                    "Cannot add TCP connect rule for port {}: {}",
-                    port, e
-                ))
-            })?;
-    }
-    for port in caps.tcp_bind_ports() {
-        debug!("Adding TCP bind rule for port {}", port);
-        ruleset = ruleset
-            .add_rule(NetPort::new(*port, AccessNet::BindTcp))
-            .map_err(|e| {
-                NonoError::SandboxInit(format!("Cannot add TCP bind rule for port {}: {}", port, e))
-            })?;
-    }
-
-    // Add localhost IPC port rules (connect + bind per port).
-    // Only meaningful in Blocked/ProxyOnly modes. In AllowAll mode, all ports are
-    // already reachable and adding Landlock network handling would restrict them.
-    if !matches!(caps.network_mode(), NetworkMode::AllowAll) {
-        for port in caps.localhost_ports() {
-            debug!("Adding localhost TCP connect rule for port {}", port);
+    // Add Landlock network port rules ONLY when Landlock is handling networking.
+    // When a seccomp fallback is active (BlockAll or ProxyOnly), the ruleset was
+    // created without handle_access(AccessNet), so adding NetPort rules would fail.
+    if matches!(seccomp_net_fallback, SeccompNetFallback::None) {
+        // Add per-port TCP connect rules (ProxyOnly port + explicit tcp_connect_ports)
+        if let NetworkMode::ProxyOnly { port, bind_ports } = caps.network_mode() {
+            debug!("Adding ProxyOnly TCP connect rule for port {}", port);
             ruleset = ruleset
                 .add_rule(NetPort::new(*port, AccessNet::ConnectTcp))
                 .map_err(|e| {
                     NonoError::SandboxInit(format!(
-                        "Cannot add TCP connect rule for localhost port {}: {}",
+                        "Cannot add TCP connect rule for proxy port {}: {}",
                         port, e
                     ))
                 })?;
-            debug!("Adding localhost TCP bind rule for port {}", port);
+            // Add per-port TCP bind rules for bind_ports in ProxyOnly mode
+            for bp in bind_ports {
+                debug!("Adding ProxyOnly TCP bind rule for port {}", bp);
+                ruleset = ruleset
+                    .add_rule(NetPort::new(*bp, AccessNet::BindTcp))
+                    .map_err(|e| {
+                        NonoError::SandboxInit(format!(
+                            "Cannot add TCP bind rule for port {}: {}",
+                            bp, e
+                        ))
+                    })?;
+            }
+        }
+        for port in caps.tcp_connect_ports() {
+            debug!("Adding TCP connect rule for port {}", port);
+            ruleset = ruleset
+                .add_rule(NetPort::new(*port, AccessNet::ConnectTcp))
+                .map_err(|e| {
+                    NonoError::SandboxInit(format!(
+                        "Cannot add TCP connect rule for port {}: {}",
+                        port, e
+                    ))
+                })?;
+        }
+        for port in caps.tcp_bind_ports() {
+            debug!("Adding TCP bind rule for port {}", port);
             ruleset = ruleset
                 .add_rule(NetPort::new(*port, AccessNet::BindTcp))
                 .map_err(|e| {
                     NonoError::SandboxInit(format!(
-                        "Cannot add TCP bind rule for localhost port {}: {}",
+                        "Cannot add TCP bind rule for port {}: {}",
                         port, e
                     ))
                 })?;
+        }
+
+        // Add localhost IPC port rules (connect + bind per port).
+        // Only meaningful in Blocked/ProxyOnly modes. In AllowAll mode, all ports are
+        // already reachable and adding Landlock network handling would restrict them.
+        if !matches!(caps.network_mode(), NetworkMode::AllowAll) {
+            for port in caps.localhost_ports() {
+                debug!("Adding localhost TCP connect rule for port {}", port);
+                ruleset = ruleset
+                    .add_rule(NetPort::new(*port, AccessNet::ConnectTcp))
+                    .map_err(|e| {
+                        NonoError::SandboxInit(format!(
+                            "Cannot add TCP connect rule for localhost port {}: {}",
+                            port, e
+                        ))
+                    })?;
+                debug!("Adding localhost TCP bind rule for port {}", port);
+                ruleset = ruleset
+                    .add_rule(NetPort::new(*port, AccessNet::BindTcp))
+                    .map_err(|e| {
+                        NonoError::SandboxInit(format!(
+                            "Cannot add TCP bind rule for localhost port {}: {}",
+                            port, e
+                        ))
+                    })?;
+            }
         }
     }
 
@@ -1532,33 +1540,28 @@ pub fn seccomp_network_fallback_mode(caps: &CapabilitySet) -> SeccompNetFallback
 /// socketpair() is allowed only for AF_UNIX.
 /// io_uring_setup() is denied.
 ///
-/// Instruction layout (18 instructions):
+/// Instruction layout (19 instructions, jt = jump offset from next insn):
 /// ```text
 ///  0: ld  [nr]
-///  1: jeq SYS_SOCKET     -> 8   (load socket family)
-///  2: jeq SYS_CONNECT    -> 15  (notify)
-///  3: jeq SYS_BIND       -> 16  (bind_action)
-///  4: jeq SYS_SOCKETPAIR -> 13  (load socketpair family)
-///  5: jeq SYS_IO_URING   -> 7   (errno)
+///  1: jeq SYS_SOCKET     jt=+6  (-> 8: load socket family)
+///  2: jeq SYS_CONNECT    jt=+13 (-> 16: notify)
+///  3: jeq SYS_BIND       jt=+13 (-> 17: bind_action)
+///  4: jeq SYS_SOCKETPAIR jt=+8  (-> 13: load socketpair family)
+///  5: jeq SYS_IO_URING   jt=+1  (-> 7: errno)
 ///  6: ret ALLOW
 ///  7: ret ERRNO(EACCES)
 ///  8: ld  [args[0]]             ; socket() family
-///  9: jeq AF_UNIX  -> 17 (allow)
-/// 10: jeq AF_INET  -> 17 (allow)
-/// 11: jeq AF_INET6 -> 17 (allow)
+///  9: jeq AF_UNIX  jt=+8 (-> 18: allow)
+/// 10: jeq AF_INET  jt=+7 (-> 18: allow)
+/// 11: jeq AF_INET6 jt=+6 (-> 18: allow)
 /// 12: ret ERRNO(EACCES)         ; bad socket family
 /// 13: ld  [args[0]]             ; socketpair() family
-/// 14: jeq AF_UNIX  -> 17 (allow); else fall through
-///     (fall through to 15=notify is wrong, so we need explicit errno)
-/// ```
-/// Corrected with explicit errno after socketpair check:
-/// 14: jeq AF_UNIX  -> 17; else fall through to 15 (errno for socketpair)
+/// 14: jeq AF_UNIX  jt=+3 (-> 18: allow)
 /// 15: ret ERRNO(EACCES)         ; bad socketpair family
 /// 16: ret USER_NOTIF            ; connect
-/// 17: ret bind_action           ; bind
+/// 17: ret bind_action           ; bind (USER_NOTIF or ERRNO)
 /// 18: ret ALLOW                 ; allowed socket/socketpair
-///
-/// Total: 19 instructions.
+/// ```
 fn build_seccomp_proxy_filter(has_bind_ports: bool) -> Vec<SockFilterInsn> {
     let errno_ret = SECCOMP_RET_ERRNO | (libc::EACCES as u32);
 
@@ -1568,22 +1571,22 @@ fn build_seccomp_proxy_filter(has_bind_ports: bool) -> Vec<SockFilterInsn> {
         errno_ret
     };
 
-    // Index table (0-based):
+    // Target instruction index table (jt/jf are offsets from next insn):
     //  0: ld [nr]
-    //  1: jeq SOCKET     -> 8
-    //  2: jeq CONNECT    -> 16
-    //  3: jeq BIND       -> 17
-    //  4: jeq SOCKETPAIR -> 13
-    //  5: jeq IO_URING   -> 7
+    //  1: jeq SOCKET     jt=6  -> insn 8
+    //  2: jeq CONNECT    jt=13 -> insn 16
+    //  3: jeq BIND       jt=13 -> insn 17
+    //  4: jeq SOCKETPAIR jt=8  -> insn 13
+    //  5: jeq IO_URING   jt=1  -> insn 7
     //  6: ret ALLOW
     //  7: ret ERRNO
     //  8: ld [args[0]]
-    //  9: jeq AF_UNIX  -> 18
-    // 10: jeq AF_INET  -> 18
-    // 11: jeq AF_INET6 -> 18
+    //  9: jeq AF_UNIX    jt=8  -> insn 18
+    // 10: jeq AF_INET    jt=7  -> insn 18
+    // 11: jeq AF_INET6   jt=6  -> insn 18
     // 12: ret ERRNO            (bad socket family)
     // 13: ld [args[0]]
-    // 14: jeq AF_UNIX  -> 18
+    // 14: jeq AF_UNIX    jt=3  -> insn 18
     // 15: ret ERRNO            (bad socketpair family)
     // 16: ret USER_NOTIF       (connect)
     // 17: ret bind_action      (bind)

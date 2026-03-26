@@ -544,10 +544,12 @@ pub(super) fn handle_network_notification(
         // already-copied sockaddr. Safe for connect/bind (move_addr_to_kernel).
         if let Err(e) = continue_notif(notify_fd, notif.id) {
             debug!("continue_notif failed for network notification: {}", e);
-            let _ = deny_notif(notify_fd, notif.id);
+            // Must respond to avoid leaving the child blocked. Propagate if
+            // deny also fails — the notification is orphaned.
+            return deny_notif(notify_fd, notif.id);
         }
     } else {
-        let _ = respond_notif_errno(notify_fd, notif.id, libc::EACCES);
+        respond_notif_errno(notify_fd, notif.id, libc::EACCES)?;
     }
 
     Ok(())

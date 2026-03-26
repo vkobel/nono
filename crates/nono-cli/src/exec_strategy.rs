@@ -680,14 +680,19 @@ pub fn execute_supervised(
                                 let child_sock =
                                     unsafe { std::os::unix::net::UnixStream::from_raw_fd(fd) };
                                 let tmp_sock = SupervisorSocket::from_stream(child_sock);
-                                if let Err(_e) = tmp_sock.send_fd(proxy_notify_fd.as_raw_fd()) {
-                                    let msg = b"nono: failed to send proxy seccomp notify fd\n";
+                                if let Err(e) = tmp_sock.send_fd(proxy_notify_fd.as_raw_fd()) {
+                                    let detail = format!(
+                                        "nono: failed to send proxy seccomp notify fd: {}\n",
+                                        e
+                                    );
+                                    let msg = detail.as_bytes();
                                     unsafe {
                                         libc::write(
                                             libc::STDERR_FILENO,
                                             msg.as_ptr().cast::<libc::c_void>(),
                                             msg.len(),
                                         );
+                                        libc::_exit(126);
                                     }
                                 }
                                 std::mem::forget(tmp_sock);
