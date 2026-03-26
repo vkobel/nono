@@ -544,7 +544,7 @@ pub fn apply_with_abi(caps: &CapabilitySet, abi: &DetectedAbi) -> Result<Seccomp
         let mut access = result.effective;
 
         if !result.dropped.is_empty() {
-            warn!(
+            debug!(
                 "Landlock ABI {:?} does not support {:?} for path {} (requested for {:?})",
                 target_abi,
                 result.dropped,
