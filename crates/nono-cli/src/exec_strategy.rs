@@ -1403,6 +1403,7 @@ fn run_supervisor_loop(
 ///
 /// Returns the child's wait status and any denial records collected.
 #[cfg(target_os = "linux")]
+#[allow(clippy::too_many_arguments)]
 fn run_supervisor_loop(
     child: Pid,
     sock: &mut SupervisorSocket,
