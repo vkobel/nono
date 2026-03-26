@@ -280,6 +280,8 @@ pub fn find_included_files_with_skip_dirs<P: AsRef<Path>>(
 ) -> Result<Vec<PathBuf>> {
     let root = root.as_ref();
     let matcher = policy.include_matcher()?;
+    let extra_skip_dirs: std::collections::HashSet<&str> =
+        extra_skip_dirs.iter().map(String::as_str).collect();
     let mut results = Vec::new();
     let mut visited = std::collections::HashSet::new();
 
@@ -291,7 +293,7 @@ pub fn find_included_files_with_skip_dirs<P: AsRef<Path>>(
         root,
         root,
         &matcher,
-        extra_skip_dirs,
+        &extra_skip_dirs,
         &mut results,
         &mut visited,
         0,
@@ -301,17 +303,17 @@ pub fn find_included_files_with_skip_dirs<P: AsRef<Path>>(
     Ok(results)
 }
 
-fn should_skip_dir(name: &str, extra_skip_dirs: &[String]) -> bool {
-    SKIP_DIRS.binary_search(&name).is_ok() || extra_skip_dirs.iter().any(|dir| dir == name)
+fn should_skip_dir(name: &str, extra_skip_dirs: &std::collections::HashSet<&str>) -> bool {
+    SKIP_DIRS.binary_search(&name).is_ok() || extra_skip_dirs.contains(name)
 }
 
 fn find_files_recursive(
     root: &Path,
     dir: &Path,
     matcher: &super::types::IncludePatterns,
-    extra_skip_dirs: &[String],
+    extra_skip_dirs: &std::collections::HashSet<&str>,
     results: &mut Vec<PathBuf>,
-    visited: &mut std::collections::HashSet<u64>,
+    visited: &mut std::collections::HashSet<(u64, u64)>,
     depth: u32,
 ) -> Result<()> {
     const MAX_DEPTH: u32 = 16;
@@ -337,15 +339,17 @@ fn find_files_recursive(
             }
 
             #[cfg(unix)]
-            let inode = {
+            let file_id = Some({
                 use std::os::unix::fs::MetadataExt;
-                meta.ino()
-            };
+                (meta.dev(), meta.ino())
+            });
             #[cfg(not(unix))]
-            let inode = 0u64;
+            let file_id: Option<(u64, u64)> = None;
 
-            if inode != 0 && !visited.insert(inode) {
-                continue;
+            if let Some(file_id) = file_id {
+                if !visited.insert(file_id) {
+                    continue;
+                }
             }
 
             find_files_recursive(
