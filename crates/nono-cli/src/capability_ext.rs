@@ -334,6 +334,9 @@ impl CapabilitySetExt for CapabilitySet {
             // Add allow_domain ports to Landlock ConnectTcp rules so non-HTTP
             // protocols (NATS, PostgreSQL, etc.) can connect directly while
             // HTTP traffic still goes through the proxy.
+            // Only on Linux — macOS uses Seatbelt which cannot filter by port;
+            // the proxy handles domain filtering at the application layer.
+            #[cfg(target_os = "linux")]
             for entry in &profile.network.allow_domain {
                 let port = parse_allow_domain_port(entry);
                 caps.add_tcp_connect_port(port);
@@ -434,6 +437,7 @@ fn finalize_caps(
 
 /// Extract port number from an allow_domain entry.
 /// Format: `"host:port"` returns the port, bare `"host"` returns 443 (HTTPS default).
+#[cfg(target_os = "linux")]
 fn parse_allow_domain_port(entry: &str) -> u16 {
     if let Some((_host, port_str)) = entry.rsplit_once(':') {
         if let Ok(port) = port_str.parse::<u16>() {
@@ -458,6 +462,9 @@ fn apply_cli_network_mode(caps: &mut CapabilitySet, args: &SandboxArgs) {
 
         // Add allow_proxy (--allow-domain) ports to Landlock ConnectTcp rules
         // so non-HTTP protocols can connect directly.
+        // Only on Linux — macOS Seatbelt cannot filter by port; the proxy
+        // handles domain filtering at the application layer.
+        #[cfg(target_os = "linux")]
         for entry in &args.allow_proxy {
             let port = parse_allow_domain_port(entry);
             caps.add_tcp_connect_port(port);
@@ -1496,6 +1503,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn test_parse_allow_domain_port_with_explicit_port() {
         assert_eq!(parse_allow_domain_port("nats.example.com:4222"), 4222);
         assert_eq!(parse_allow_domain_port("postgres.example.com:5432"), 5432);
@@ -1503,18 +1511,21 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn test_parse_allow_domain_port_default() {
         assert_eq!(parse_allow_domain_port("api.example.com"), 443);
         assert_eq!(parse_allow_domain_port("*.example.com"), 443);
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn test_parse_allow_domain_port_invalid_port() {
         // Invalid port string falls back to 443
         assert_eq!(parse_allow_domain_port("host:notaport"), 443);
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn test_from_profile_allow_domain_ports_added_to_tcp_connect() {
         let dir = tempdir().expect("tmpdir");
         let profile_path = dir.path().join("allow-domain-ports.json");
@@ -1559,6 +1570,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn test_from_args_allow_proxy_ports_added_to_tcp_connect() {
         let args = SandboxArgs {
             allow_proxy: vec![
