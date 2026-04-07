@@ -124,9 +124,15 @@ impl ProxyHandle {
     pub fn credential_env_vars(&self, config: &ProxyConfig) -> Vec<(String, String)> {
         let mut vars = Vec::new();
         for route in &config.routes {
+            // Strip any leading '/' from the prefix — prefix should be a bare
+            // service name (e.g., "anthropic"), not a URL path ("/anthropic").
+            // Defensively handle both forms to prevent malformed env var names
+            // (e.g., "/ANTHROPIC_BASE_URL") and double-slashed URLs.
+            let prefix = route.prefix.strip_prefix('/').unwrap_or(&route.prefix);
+
             // Base URL override (e.g., OPENAI_BASE_URL)
-            let base_url_name = format!("{}_BASE_URL", route.prefix.to_uppercase());
-            let url = format!("http://127.0.0.1:{}/{}", self.port, route.prefix);
+            let base_url_name = format!("{}_BASE_URL", prefix.to_uppercase());
+            let url = format!("http://127.0.0.1:{}/{}", self.port, prefix);
             vars.push((base_url_name, url));
 
             // Only inject phantom token env vars for routes whose credentials
@@ -767,6 +773,51 @@ mod tests {
         assert!(
             github_token.is_none(),
             "unloaded route must not inject phantom GITHUB_TOKEN"
+        );
+    }
+
+    #[test]
+    fn test_proxy_credential_env_vars_strips_leading_slash() {
+        // When prefix includes a leading slash (e.g., "/anthropic"), the env
+        // var name must not contain the slash and the URL must not double-slash.
+        // Regression test for user-reported bug where "/anthropic" produced
+        // "/ANTHROPIC_BASE_URL=http://127.0.0.1:PORT//anthropic".
+        let (shutdown_tx, _) = tokio::sync::watch::channel(false);
+        let handle = ProxyHandle {
+            port: 58406,
+            token: Zeroizing::new("test_token".to_string()),
+            audit_log: audit::new_audit_log(),
+            shutdown_tx,
+            loaded_routes: std::collections::HashSet::new(),
+            no_proxy_hosts: Vec::new(),
+        };
+        let config = ProxyConfig {
+            routes: vec![crate::config::RouteConfig {
+                prefix: "/anthropic".to_string(),
+                upstream: "https://api.anthropic.com".to_string(),
+                credential_key: None,
+                inject_mode: crate::config::InjectMode::Header,
+                inject_header: "Authorization".to_string(),
+                credential_format: "Bearer {}".to_string(),
+                path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
+                env_var: None,
+                endpoint_rules: vec![],
+                tls_ca: None,
+            }],
+            ..Default::default()
+        };
+
+        let vars = handle.credential_env_vars(&config);
+        assert_eq!(vars.len(), 1);
+        assert_eq!(
+            vars[0].0, "ANTHROPIC_BASE_URL",
+            "env var name must not have leading slash"
+        );
+        assert_eq!(
+            vars[0].1, "http://127.0.0.1:58406/anthropic",
+            "URL must not have double slash"
         );
     }
 
