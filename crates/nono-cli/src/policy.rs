@@ -222,6 +222,20 @@ fn is_nix_store_path(path: &Path) -> bool {
     path.starts_with("/nix/store")
 }
 
+/// Decide whether a resolved (canonical) deny target should be skipped.
+///
+/// On Linux, symlink targets inside `/nix/store` are immutable and cannot
+/// hold runtime secrets, so adding them to the deny list is both unnecessary
+/// and harmful (causes Landlock deny-overlap errors when `/nix/store` is
+/// allowed by the `nix_runtime` group). The original symlink path is still
+/// denied, so the security posture is unchanged for non-Nix environments.
+///
+/// On macOS this always returns `false` — Seatbelt handles deny-within-allow
+/// natively, and the canonical form is needed for correct kernel matching.
+fn should_skip_resolved_deny_target(resolved: &Path) -> bool {
+    cfg!(target_os = "linux") && is_nix_store_path(resolved)
+}
+
 /// Convert a PathBuf to a UTF-8 string, returning an error for non-UTF-8 paths.
 ///
 /// Non-UTF-8 paths would produce incorrect Seatbelt rules via lossy conversion,
@@ -567,13 +581,7 @@ pub(crate) fn add_deny_access_rules(
     let canonical = path.canonicalize().ok();
     if let Some(ref canonical) = canonical {
         if *canonical != path {
-            // On NixOS with home-manager, shell config files (e.g. ~/.zshrc) are
-            // symlinks into /nix/store/..., which is immutable. Adding the canonical
-            // path to deny_paths would cause a Landlock deny-overlap error when
-            // /nix/store is allowed for read. Since Nix store paths are immutable
-            // and cannot contain runtime secrets, skip adding the canonical form
-            // to deny_paths on Linux — the original symlink path is still denied.
-            if cfg!(target_os = "linux") && is_nix_store_path(canonical) {
+            if should_skip_resolved_deny_target(canonical) {
                 debug!(
                     "Skipping deny canonical path '{}' (Nix store immutable symlink target of '{}')",
                     canonical.display(),
@@ -1047,8 +1055,7 @@ pub fn get_sensitive_paths(policy: &Policy) -> Result<Vec<SensitivePathRule>> {
                 // denial for paths the sandbox actually permits.
                 if expanded.is_symlink() {
                     if let Ok(resolved) = expanded.canonicalize() {
-                        let skip = cfg!(target_os = "linux") && is_nix_store_path(&resolved);
-                        if resolved != expanded && !skip {
+                        if resolved != expanded && !should_skip_resolved_deny_target(&resolved) {
                             result.push(SensitivePathRule {
                                 expanded_path: resolved.to_string_lossy().into_owned(),
                                 group_name: group_name.clone(),
@@ -1751,13 +1758,57 @@ mod tests {
     }
 
     #[test]
-    fn test_sensitive_paths_skips_nix_store_symlink_target_on_linux() {
-        // Simulate a NixOS home-manager scenario: a deny-listed shell config
-        // file is a symlink whose canonical target is inside /nix/store.
-        // We can't create real /nix/store paths in tests, so we test the
-        // is_nix_store_path helper indirectly and verify the branching logic.
+    fn test_should_skip_resolved_deny_target() {
+        // Directly exercise the shared predicate used by both
+        // add_deny_access_rules and get_sensitive_paths.
 
-        // Part 1: non-nix symlink targets ARE included (baseline)
+        let nix_paths = [
+            Path::new("/nix/store/abc123-home-manager-files/.zshrc"),
+            Path::new("/nix/store/xyz789-zsh-5.9/share/zsh"),
+            Path::new("/nix/store"),
+        ];
+
+        let non_nix_paths = [
+            Path::new("/home/user/.zshrc"),
+            Path::new("/nix/var/nix/profiles/default"),
+            Path::new("/nix"),
+            Path::new("/nix/stored-elsewhere"),
+            Path::new("/tmp/nix/store/fake"),
+        ];
+
+        for p in &nix_paths {
+            if cfg!(target_os = "linux") {
+                assert!(
+                    should_skip_resolved_deny_target(p),
+                    "Linux must skip Nix store target: {}",
+                    p.display()
+                );
+            } else {
+                assert!(
+                    !should_skip_resolved_deny_target(p),
+                    "macOS must NOT skip Nix store target (Seatbelt needs it): {}",
+                    p.display()
+                );
+            }
+        }
+
+        for p in &non_nix_paths {
+            assert!(
+                !should_skip_resolved_deny_target(p),
+                "must never skip non-Nix-store path: {}",
+                p.display()
+            );
+        }
+    }
+
+    #[test]
+    fn test_sensitive_paths_nix_store_symlink_end_to_end() {
+        // End-to-end: a symlinked deny target whose canonical form is NOT
+        // in /nix/store is included. We cannot create real /nix/store files
+        // in tests, but should_skip_resolved_deny_target (tested above)
+        // covers the /nix/store branch directly. Here we verify that the
+        // integration between get_sensitive_paths and the predicate works:
+        // non-skipped symlink targets must appear in the result.
         let dir = tempfile::tempdir().expect("create tempdir");
         let target = dir.path().join("real_zshrc");
         std::fs::write(&target, "config").expect("write");
@@ -1782,18 +1833,19 @@ mod tests {
         let canonical = link.canonicalize().expect("canonicalize");
         let paths: Vec<&str> = sensitive.iter().map(|r| r.expanded_path.as_str()).collect();
 
-        // Non-nix symlink: canonical target should always be included
+        // The canonical target is not in /nix/store, so it must be included
+        assert!(
+            !should_skip_resolved_deny_target(&canonical),
+            "precondition: tempdir canonical is not a nix store path"
+        );
+        assert!(
+            paths.contains(&link_str),
+            "sensitive paths must contain the symlink path"
+        );
         assert!(
             paths.contains(&canonical.to_str().expect("utf8")),
             "non-nix canonical target must be in sensitive paths"
         );
-
-        // Part 2: verify is_nix_store_path correctly identifies store paths
-        // (used by get_sensitive_paths to skip canonical targets on Linux)
-        assert!(is_nix_store_path(Path::new(
-            "/nix/store/abc123-home-manager-files/.zshrc"
-        )));
-        assert!(!is_nix_store_path(&canonical));
     }
 
     #[test]
@@ -2590,25 +2642,10 @@ mod tests {
     }
 
     #[test]
-    fn test_is_nix_store_path() {
-        assert!(is_nix_store_path(Path::new(
-            "/nix/store/abc123-some-package/bin/zsh"
-        )));
-        assert!(is_nix_store_path(Path::new("/nix/store/hash123-.zshrc")));
-        assert!(is_nix_store_path(Path::new("/nix/store")));
-
-        assert!(!is_nix_store_path(Path::new("/nix/var/nix/profiles")));
-        assert!(!is_nix_store_path(Path::new("/home/user/.zshrc")));
-        assert!(!is_nix_store_path(Path::new("/nix")));
-        assert!(!is_nix_store_path(Path::new("/nix/stored")));
-    }
-
-    #[test]
     fn test_deny_access_skips_nix_store_canonical_on_linux() {
-        // Create a temp dir to simulate a nix store symlink scenario.
-        // We can't create /nix/store in tests, so we test the helper
-        // function directly and verify the logic in add_deny_access_rules
-        // for non-nix paths still works correctly.
+        // Verify that add_deny_access_rules still includes canonical paths
+        // for non-Nix-store symlinks (the skip logic only fires for
+        // /nix/store targets, tested via should_skip_resolved_deny_target).
         let dir = tempfile::tempdir().expect("create tempdir");
         let target = dir.path().join("real_file");
         std::fs::write(&target, "content").expect("write target");
@@ -2620,8 +2657,15 @@ mod tests {
         let link_str = link.to_str().expect("valid utf8");
         add_deny_access_rules(link_str, &mut caps, &mut deny_paths).expect("add deny rules");
 
-        // For non-nix-store symlinks, both paths should still be in deny_paths
         let link_canonical = link.canonicalize().expect("canonicalize");
+
+        // Precondition: the canonical is not a nix store path
+        assert!(
+            !should_skip_resolved_deny_target(&link_canonical),
+            "precondition: tempdir canonical is not a nix store path"
+        );
+
+        // Both the symlink and its canonical target should be in deny_paths
         assert!(
             deny_paths.contains(&link),
             "deny_paths must contain the symlink path"
