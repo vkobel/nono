@@ -1134,6 +1134,8 @@ pub fn execute_supervised(
             };
 
             // Analyze PTY screen content for sandbox-related errors.
+            // Use both the vt100 screen state (for visual content) and the
+            // denial capture buffer (for raw byte-level path matching).
             let error_observation = pty_proxy
                 .as_ref()
                 .map(|p| {
@@ -1145,6 +1147,42 @@ pub fn execute_supervised(
                 })
                 .unwrap_or_default();
 
+            // Enrich denials with stderr observations and deduplicate.
+            // This merges seccomp-notify denials with paths inferred from
+            // stderr, and cross-references to remove duplicates.
+            let child_pid = match status {
+                WaitStatus::Exited(pid, _) | WaitStatus::Signaled(pid, _, _) => pid.as_raw() as u32,
+                _ => 0,
+            };
+            let enriched_denials = nono::diagnostic::enrich_with_stderr_hints(
+                &denials,
+                &error_observation.path_hints,
+                child_pid,
+            );
+            let enriched_denials = nono::diagnostic::deduplicate_denials(&enriched_denials);
+
+            // Cross-reference seccomp-notify denials with PTY capture buffer.
+            // Log which denials are confirmed by the child's error output and
+            // scan the capture for Landlock-level denials not caught by seccomp.
+            if let Some(ref p) = pty_proxy {
+                for denial in &enriched_denials {
+                    if p.denial_capture_contains_path(&denial.path) {
+                        debug!(
+                            "Denial for {} confirmed in PTY capture (source: {})",
+                            denial.path.display(),
+                            denial.source,
+                        );
+                    }
+                }
+                let capture_text = p.denial_capture_plaintext();
+                if !capture_text.is_empty() {
+                    debug!(
+                        "Denial capture buffer: {} bytes of child output available for analysis",
+                        capture_text.len(),
+                    );
+                }
+            }
+
             let mode = if supervisor.is_some() {
                 DiagnosticMode::Supervised
             } else {
@@ -1152,7 +1190,9 @@ pub fn execute_supervised(
             };
 
             let should_print_diagnostics = !config.no_diagnostics
-                && (exit_code != 0 || !denials.is_empty() || error_observation.has_findings());
+                && (exit_code != 0
+                    || !enriched_denials.is_empty()
+                    || error_observation.has_findings());
 
             // Print diagnostic footer on non-zero exit or when the PTY
             // output shows a likely sandbox-related issue.
@@ -1170,7 +1210,7 @@ pub fn execute_supervised(
 
                 let mut formatter = DiagnosticFormatter::new(config.caps)
                     .with_mode(mode)
-                    .with_denials(&denials)
+                    .with_denials(&enriched_denials)
                     .with_sandbox_violations(&sandbox_violations)
                     .with_protected_paths(config.protected_paths)
                     .with_error_observation(error_observation)
@@ -2080,11 +2120,12 @@ fn handle_supervisor_message(
             if let Some(reason) = replay_denial_reason {
                 record_denial(
                     denials,
-                    DenialRecord {
-                        path: request.path.clone(),
-                        access: request.access,
-                        reason: DenialReason::PolicyBlocked,
-                    },
+                    DenialRecord::from_ipc(
+                        request.path.clone(),
+                        request.access,
+                        DenialReason::PolicyBlocked,
+                        request.child_pid,
+                    ),
                 );
                 let response = SupervisorResponse::Decision {
                     request_id: request.request_id,
@@ -2113,11 +2154,12 @@ fn handle_supervisor_message(
                 );
                 record_denial(
                     denials,
-                    DenialRecord {
-                        path: request.path.clone(),
-                        access: request.access,
-                        reason: DenialReason::PolicyBlocked,
-                    },
+                    DenialRecord::from_ipc(
+                        request.path.clone(),
+                        request.access,
+                        DenialReason::PolicyBlocked,
+                        request.child_pid,
+                    ),
                 );
                 ApprovalDecision::Denied {
                     reason: format!(
@@ -2146,11 +2188,12 @@ fn handle_supervisor_message(
                                 if d.is_denied() {
                                     record_denial(
                                         denials,
-                                        DenialRecord {
-                                            path: request.path.clone(),
-                                            access: request.access,
-                                            reason: DenialReason::UserDenied,
-                                        },
+                                        DenialRecord::from_ipc(
+                                            request.path.clone(),
+                                            request.access,
+                                            DenialReason::UserDenied,
+                                            request.child_pid,
+                                        ),
                                     );
                                 }
                                 d
@@ -2159,11 +2202,12 @@ fn handle_supervisor_message(
                                 warn!("Approval backend error: {}", e);
                                 record_denial(
                                     denials,
-                                    DenialRecord {
-                                        path: request.path.clone(),
-                                        access: request.access,
-                                        reason: DenialReason::BackendError,
-                                    },
+                                    DenialRecord::from_ipc(
+                                        request.path.clone(),
+                                        request.access,
+                                        DenialReason::BackendError,
+                                        request.child_pid,
+                                    ),
                                 );
                                 ApprovalDecision::Denied {
                                     reason: format!("Approval backend error: {e}"),
@@ -2180,11 +2224,12 @@ fn handle_supervisor_message(
                         );
                         record_denial(
                             denials,
-                            DenialRecord {
-                                path: request.path.clone(),
-                                access: request.access,
-                                reason: DenialReason::PolicyBlocked,
-                            },
+                            DenialRecord::from_ipc(
+                                request.path.clone(),
+                                request.access,
+                                DenialReason::PolicyBlocked,
+                                request.child_pid,
+                            ),
                         );
                         ApprovalDecision::Denied {
                             reason: format!("Instruction file failed trust verification: {reason}"),
@@ -2198,11 +2243,12 @@ fn handle_supervisor_message(
                         if d.is_denied() {
                             record_denial(
                                 denials,
-                                DenialRecord {
-                                    path: request.path.clone(),
-                                    access: request.access,
-                                    reason: DenialReason::UserDenied,
-                                },
+                                DenialRecord::from_ipc(
+                                    request.path.clone(),
+                                    request.access,
+                                    DenialReason::UserDenied,
+                                    request.child_pid,
+                                ),
                             );
                         }
                         d
@@ -2211,11 +2257,12 @@ fn handle_supervisor_message(
                         warn!("Approval backend error: {}", e);
                         record_denial(
                             denials,
-                            DenialRecord {
-                                path: request.path.clone(),
-                                access: request.access,
-                                reason: DenialReason::BackendError,
-                            },
+                            DenialRecord::from_ipc(
+                                request.path.clone(),
+                                request.access,
+                                DenialReason::BackendError,
+                                request.child_pid,
+                            ),
                         );
                         ApprovalDecision::Denied {
                             reason: format!("Approval backend error: {e}"),
@@ -3054,11 +3101,11 @@ mod tests {
         for _ in 0..(MAX_DENIAL_RECORDS + 10) {
             record_denial(
                 &mut denials,
-                DenialRecord {
-                    path: "/tmp/test".into(),
-                    access: nono::AccessMode::Read,
-                    reason: DenialReason::PolicyBlocked,
-                },
+                DenialRecord::basic(
+                    "/tmp/test".into(),
+                    nono::AccessMode::Read,
+                    DenialReason::PolicyBlocked,
+                ),
             );
         }
         assert_eq!(denials.len(), MAX_DENIAL_RECORDS);

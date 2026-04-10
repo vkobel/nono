@@ -65,8 +65,8 @@ pub use capability::{
     ProcessInfoMode, SignalMode,
 };
 pub use diagnostic::{
-    CommandContext, DenialReason, DenialRecord, DiagnosticFormatter, DiagnosticMode,
-    SandboxViolation,
+    CommandContext, DenialReason, DenialRecord, DenialSource, DeniedSyscall, DiagnosticFormatter,
+    DiagnosticMode, SandboxViolation,
 };
 pub use error::{NonoError, Result};
 pub use keystore::{

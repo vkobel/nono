@@ -795,6 +795,22 @@ pub const SYS_OPENAT: i32 = 56;
 #[cfg(target_arch = "aarch64")]
 pub const SYS_OPENAT2: i32 = 437;
 
+// Extended syscall numbers for enriched filename capture (PoC).
+// These are intercepted by the extended BPF filter to report *which* operation
+// was denied, not just that access to a path was blocked.
+#[cfg(target_os = "linux")]
+pub const SYS_UNLINKAT: i32 = libc::SYS_unlinkat as i32;
+#[cfg(target_os = "linux")]
+pub const SYS_RENAMEAT2: i32 = libc::SYS_renameat2 as i32;
+#[cfg(target_os = "linux")]
+pub const SYS_MKDIRAT: i32 = libc::SYS_mkdirat as i32;
+#[cfg(target_os = "linux")]
+pub const SYS_FCHMODAT: i32 = libc::SYS_fchmodat as i32;
+#[cfg(target_os = "linux")]
+pub const SYS_SYMLINKAT: i32 = libc::SYS_symlinkat as i32;
+#[cfg(target_os = "linux")]
+pub const SYS_LINKAT: i32 = libc::SYS_linkat as i32;
+
 #[cfg(target_os = "linux")]
 const SYS_SOCKET: i32 = libc::SYS_socket as i32;
 #[cfg(target_os = "linux")]
@@ -1001,6 +1017,216 @@ pub fn install_seccomp_notify() -> Result<std::os::fd::OwnedFd> {
     // SAFETY: The fd returned by seccomp() with NEW_LISTENER is a valid,
     // newly-created file descriptor that we now own.
     Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(notify_fd) })
+}
+
+/// Install an extended seccomp-notify BPF filter that intercepts openat/openat2
+/// plus destructive filesystem syscalls (unlinkat, renameat2, mkdirat, etc.).
+///
+/// This is the PoC for enriched filename capture. The extended filter routes
+/// additional path-bearing syscalls to `SECCOMP_RET_USER_NOTIF` so the supervisor
+/// can record the exact syscall type and path in `DenialRecord`.
+///
+/// Returns the notify fd. Must be called BEFORE `Sandbox::apply()`.
+///
+/// # Syscalls intercepted
+///
+/// | Syscall | Path arg position | Notes |
+/// |---------|-------------------|-------|
+/// | openat | args[1] | Already in base filter |
+/// | openat2 | args[1] | Already in base filter |
+/// | unlinkat | args[1] | Destructive: delete file/dir |
+/// | renameat2 | args[1], args[3] | Two paths (old, new) |
+/// | mkdirat | args[1] | Create directory |
+/// | fchmodat | args[1] | Change permissions |
+/// | symlinkat | args[1] (target) | Create symbolic link |
+/// | linkat | args[1] (old), args[3] (new) | Create hard link |
+///
+/// # Errors
+///
+/// Returns an error if the kernel doesn't support seccomp user notifications.
+pub fn install_seccomp_notify_extended() -> Result<std::os::fd::OwnedFd> {
+    use std::os::fd::FromRawFd;
+
+    // Extended BPF program: check syscall number against all intercepted syscalls.
+    // BPF jump targets are relative to the *next* instruction.
+    let filter = [
+        // 0: Load syscall number
+        SockFilterInsn {
+            code: BPF_LD | BPF_W | BPF_ABS,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_DATA_NR_OFFSET,
+        },
+        // 1: If openat -> jump to notify (instruction 10, offset = 8)
+        SockFilterInsn {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 8,
+            jf: 0,
+            k: SYS_OPENAT as u32,
+        },
+        // 2: If openat2 -> notify (offset = 7)
+        SockFilterInsn {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 7,
+            jf: 0,
+            k: SYS_OPENAT2 as u32,
+        },
+        // 3: If unlinkat -> notify (offset = 6)
+        SockFilterInsn {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 6,
+            jf: 0,
+            k: SYS_UNLINKAT as u32,
+        },
+        // 4: If renameat2 -> notify (offset = 5)
+        SockFilterInsn {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 5,
+            jf: 0,
+            k: SYS_RENAMEAT2 as u32,
+        },
+        // 5: If mkdirat -> notify (offset = 4)
+        SockFilterInsn {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 4,
+            jf: 0,
+            k: SYS_MKDIRAT as u32,
+        },
+        // 6: If fchmodat -> notify (offset = 3)
+        SockFilterInsn {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 3,
+            jf: 0,
+            k: SYS_FCHMODAT as u32,
+        },
+        // 7: If symlinkat -> notify (offset = 2)
+        SockFilterInsn {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 2,
+            jf: 0,
+            k: SYS_SYMLINKAT as u32,
+        },
+        // 8: If linkat -> notify (offset = 1)
+        SockFilterInsn {
+            code: BPF_JMP | BPF_JEQ | BPF_K,
+            jt: 1,
+            jf: 0,
+            k: SYS_LINKAT as u32,
+        },
+        // 9: Allow all other syscalls
+        SockFilterInsn {
+            code: BPF_RET | BPF_K,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_RET_ALLOW,
+        },
+        // 10: Route to user notification
+        SockFilterInsn {
+            code: BPF_RET | BPF_K,
+            jt: 0,
+            jf: 0,
+            k: SECCOMP_RET_USER_NOTIF,
+        },
+    ];
+
+    let prog = SockFprog {
+        len: filter.len() as u16,
+        filter: filter.as_ptr(),
+    };
+
+    // SAFETY: prctl with PR_SET_NO_NEW_PRIVS is always safe to call.
+    // SAFETY: `prctl(PR_SET_NO_NEW_PRIVS)` is process-local, takes only scalar
+    // arguments here, and does not dereference pointers.
+    let ret = unsafe { libc::prctl(libc::PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) };
+    if ret != 0 {
+        return Err(NonoError::SandboxInit(format!(
+            "prctl(PR_SET_NO_NEW_PRIVS) failed: {}",
+            std::io::Error::last_os_error()
+        )));
+    }
+
+    // Try with WAIT_KILLABLE_RECV first (kernel 5.19+) for Go runtime compatibility.
+    let flags = SECCOMP_FILTER_FLAG_NEW_LISTENER | SECCOMP_FILTER_FLAG_WAIT_KILLABLE_RECV;
+
+    // SAFETY: seccomp() with SECCOMP_SET_MODE_FILTER installs a BPF filter.
+    // The prog pointer is valid for the duration of the syscall. The filter
+    // array is stack-allocated and outlives the syscall.
+    let ret = unsafe {
+        libc::syscall(
+            libc::SYS_seccomp,
+            SECCOMP_SET_MODE_FILTER,
+            flags,
+            &prog as *const SockFprog,
+        )
+    };
+
+    let notify_fd = if ret < 0 {
+        // Retry without WAIT_KILLABLE_RECV (kernel < 5.19)
+        let flags = SECCOMP_FILTER_FLAG_NEW_LISTENER;
+        // SAFETY: Same as above, retrying with fewer flags.
+        let ret = unsafe {
+            libc::syscall(
+                libc::SYS_seccomp,
+                SECCOMP_SET_MODE_FILTER,
+                flags,
+                &prog as *const SockFprog,
+            )
+        };
+        if ret < 0 {
+            return Err(NonoError::SandboxInit(format!(
+                "seccomp(SECCOMP_SET_MODE_FILTER) extended filter failed: {}. \
+                 Requires kernel >= 5.0 with SECCOMP_FILTER_FLAG_NEW_LISTENER.",
+                std::io::Error::last_os_error()
+            )));
+        }
+        ret as i32
+    } else {
+        ret as i32
+    };
+
+    // SAFETY: The fd returned by seccomp() with NEW_LISTENER is a valid,
+    // newly-created file descriptor that we now own.
+    Ok(unsafe { std::os::fd::OwnedFd::from_raw_fd(notify_fd) })
+}
+
+/// Classify the intended access mode for a non-open filesystem syscall.
+///
+/// Unlike openat/openat2 where flags encode the access mode, destructive
+/// syscalls have fixed semantics (all are write operations).
+#[must_use]
+pub fn classify_access_for_fs_syscall(syscall_nr: i32) -> crate::AccessMode {
+    match syscall_nr {
+        nr if nr == SYS_UNLINKAT
+            || nr == SYS_RENAMEAT2
+            || nr == SYS_MKDIRAT
+            || nr == SYS_FCHMODAT
+            || nr == SYS_SYMLINKAT
+            || nr == SYS_LINKAT =>
+        {
+            crate::AccessMode::Write
+        }
+        // Default to ReadWrite for unknown — fail conservative
+        _ => crate::AccessMode::ReadWrite,
+    }
+}
+
+/// Map a syscall number to the corresponding `DeniedSyscall` variant.
+///
+/// Returns `None` for unrecognized syscall numbers.
+#[must_use]
+pub fn syscall_to_denied(syscall_nr: i32) -> Option<crate::diagnostic::DeniedSyscall> {
+    use crate::diagnostic::DeniedSyscall;
+    match syscall_nr {
+        nr if nr == SYS_OPENAT => Some(DeniedSyscall::Openat),
+        nr if nr == SYS_OPENAT2 => Some(DeniedSyscall::Openat2),
+        nr if nr == SYS_UNLINKAT => Some(DeniedSyscall::Unlinkat),
+        nr if nr == SYS_RENAMEAT2 => Some(DeniedSyscall::Renameat2),
+        nr if nr == SYS_MKDIRAT => Some(DeniedSyscall::Mkdirat),
+        nr if nr == SYS_FCHMODAT => Some(DeniedSyscall::Fchmodat),
+        nr if nr == SYS_SYMLINKAT => Some(DeniedSyscall::Symlinkat),
+        nr if nr == SYS_LINKAT => Some(DeniedSyscall::Linkat),
+        _ => None,
+    }
 }
 
 /// Install a seccomp filter that blocks non-Unix socket creation.

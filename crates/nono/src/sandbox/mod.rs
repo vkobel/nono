@@ -29,11 +29,13 @@ pub use linux::is_wsl2;
 // Re-export Linux seccomp-notify primitives for supervisor use
 #[cfg(target_os = "linux")]
 pub use linux::{
-    classify_access_from_flags, continue_notif, deny_notif, inject_fd, install_seccomp_notify,
+    classify_access_for_fs_syscall, classify_access_from_flags, continue_notif, deny_notif,
+    inject_fd, install_seccomp_notify, install_seccomp_notify_extended,
     install_seccomp_proxy_filter, notif_id_valid, probe_seccomp_block_network_support,
     read_notif_path, read_notif_sockaddr, read_open_how, recv_notif, resolve_notif_path,
-    respond_notif_errno, validate_openat2_size, OpenHow, SeccompData, SeccompNetFallback,
-    SeccompNotif, SockaddrInfo, SYS_BIND, SYS_CONNECT, SYS_OPENAT, SYS_OPENAT2,
+    respond_notif_errno, syscall_to_denied, validate_openat2_size, OpenHow, SeccompData,
+    SeccompNetFallback, SeccompNotif, SockaddrInfo, SYS_BIND, SYS_CONNECT, SYS_FCHMODAT,
+    SYS_LINKAT, SYS_MKDIRAT, SYS_OPENAT, SYS_OPENAT2, SYS_RENAMEAT2, SYS_SYMLINKAT, SYS_UNLINKAT,
 };
 
 /// Information about sandbox support on this platform

@@ -113,10 +113,11 @@ pub(super) fn handle_seccomp_notification(
     denials: &mut Vec<DenialRecord>,
     mut trust_interceptor: Option<&mut TrustInterceptor>,
 ) -> Result<()> {
+    use nono::diagnostic::DeniedSyscall;
     use nono::sandbox::{
-        classify_access_from_flags, continue_notif, deny_notif, inject_fd, notif_id_valid,
-        read_notif_path, read_open_how, recv_notif, resolve_notif_path, respond_notif_errno,
-        validate_openat2_size, SYS_OPENAT, SYS_OPENAT2,
+        classify_access_for_fs_syscall, classify_access_from_flags, continue_notif, deny_notif,
+        inject_fd, notif_id_valid, read_notif_path, read_open_how, recv_notif, resolve_notif_path,
+        respond_notif_errno, syscall_to_denied, validate_openat2_size, SYS_OPENAT, SYS_OPENAT2,
     };
 
     // 1. Receive the notification
@@ -153,13 +154,17 @@ pub(super) fn handle_seccomp_notification(
         return Ok(());
     }
 
-    // Determine access mode from open flags. The two syscalls have different layouts:
+    // Determine access mode and syscall type from the notification.
+    // The two open syscalls have different layouts:
     //   - openat(dirfd, pathname, flags, mode): args[2] is the flags integer
     //   - openat2(dirfd, pathname, how, size): args[2] is a pointer to struct open_how
-    let access = match notif.data.nr {
+    let (access, syscall_type) = match notif.data.nr {
         SYS_OPENAT => {
             // openat: args[2] is the flags integer directly
-            classify_access_from_flags(notif.data.args[2] as i32)
+            (
+                classify_access_from_flags(notif.data.args[2] as i32),
+                DeniedSyscall::Openat,
+            )
         }
         SYS_OPENAT2 => {
             // openat2: args[2] is a pointer to struct open_how, args[3] is the size
@@ -174,7 +179,10 @@ pub(super) fn handle_seccomp_notification(
             }
 
             match read_open_how(notif.pid, notif.data.args[2]) {
-                Ok(open_how) => classify_access_from_flags(open_how.flags as i32),
+                Ok(open_how) => (
+                    classify_access_from_flags(open_how.flags as i32),
+                    DeniedSyscall::Openat2,
+                ),
                 Err(e) => {
                     // Fail closed: deny when flags cannot be determined
                     warn!("Failed to read open_how struct for openat2, denying: {}", e);
@@ -184,12 +192,22 @@ pub(super) fn handle_seccomp_notification(
             }
         }
         other => {
-            // Unexpected syscall (shouldn't happen with our BPF filter)
-            warn!("Unexpected syscall {} in seccomp handler, denying", other);
-            let _ = deny_notif(notify_fd, notif.id);
-            return Ok(());
+            // Extended syscall set (unlinkat, renameat2, mkdirat, etc.)
+            // These all have the path in args[1] and are write operations.
+            if let Some(denied_syscall) = syscall_to_denied(other) {
+                (classify_access_for_fs_syscall(other), denied_syscall)
+            } else {
+                // Truly unexpected syscall (shouldn't happen with our BPF filter)
+                warn!("Unexpected syscall {} in seccomp handler, denying", other);
+                let _ = deny_notif(notify_fd, notif.id);
+                return Ok(());
+            }
         }
     };
+
+    // Track whether this is an open-type syscall (needs fd injection) or a
+    // non-open syscall (uses continue_notif for allow).
+    let is_open_syscall = matches!(syscall_type, DeniedSyscall::Openat | DeniedSyscall::Openat2);
 
     let procfs_context = ProcfsAccessContext::new(child.as_raw() as u32, Some(notif.pid));
     let resolved_path = match resolve_procfs_path_for_child(&path, Some(procfs_context)) {
@@ -224,11 +242,13 @@ pub(super) fn handle_seccomp_notification(
         );
         record_denial(
             denials,
-            DenialRecord {
-                path: canonicalized.clone(),
+            DenialRecord::from_seccomp(
+                canonicalized.clone(),
                 access,
-                reason: DenialReason::PolicyBlocked,
-            },
+                DenialReason::PolicyBlocked,
+                syscall_type,
+                child.as_raw() as u32,
+            ),
         );
         let _ = deny_notif(notify_fd, notif.id);
         return Ok(());
@@ -248,11 +268,13 @@ pub(super) fn handle_seccomp_notification(
             );
             record_denial(
                 denials,
-                DenialRecord {
-                    path: canonicalized.clone(),
+                DenialRecord::from_seccomp(
+                    canonicalized.clone(),
                     access,
-                    reason: DenialReason::InsufficientAccess,
-                },
+                    DenialReason::InsufficientAccess,
+                    syscall_type,
+                    child.as_raw() as u32,
+                ),
             );
             let _ = deny_notif(notify_fd, notif.id);
             return Ok(());
@@ -287,11 +309,13 @@ pub(super) fn handle_seccomp_notification(
                         if e.is_policy_blocked() {
                             record_denial(
                                 denials,
-                                DenialRecord {
-                                    path: canonicalized.clone(),
+                                DenialRecord::from_seccomp(
+                                    canonicalized.clone(),
                                     access,
-                                    reason: DenialReason::PolicyBlocked,
-                                },
+                                    DenialReason::PolicyBlocked,
+                                    syscall_type,
+                                    child.as_raw() as u32,
+                                ),
                             );
                             let _ = deny_notif(notify_fd, notif.id);
                         } else {
@@ -345,11 +369,13 @@ pub(super) fn handle_seccomp_notification(
         debug!("Rate limited seccomp notification for {}", path.display());
         record_denial(
             denials,
-            DenialRecord {
-                path: path.clone(),
+            DenialRecord::from_seccomp(
+                path.clone(),
                 access,
-                reason: DenialReason::RateLimited,
-            },
+                DenialReason::RateLimited,
+                syscall_type,
+                child.as_raw() as u32,
+            ),
         );
         let _ = deny_notif(notify_fd, notif.id);
         return Ok(());
@@ -380,11 +406,13 @@ pub(super) fn handle_seccomp_notification(
                 );
                 record_denial(
                     denials,
-                    DenialRecord {
-                        path: path.clone(),
+                    DenialRecord::from_seccomp(
+                        path.clone(),
                         access,
-                        reason: DenialReason::PolicyBlocked,
-                    },
+                        DenialReason::PolicyBlocked,
+                        syscall_type,
+                        child.as_raw() as u32,
+                    ),
                 );
                 let _ = deny_notif(notify_fd, notif.id);
                 return Ok(());
@@ -409,11 +437,13 @@ pub(super) fn handle_seccomp_notification(
             if d.is_denied() {
                 record_denial(
                     denials,
-                    DenialRecord {
-                        path: path.clone(),
+                    DenialRecord::from_seccomp(
+                        path.clone(),
                         access,
-                        reason: DenialReason::UserDenied,
-                    },
+                        DenialReason::UserDenied,
+                        syscall_type,
+                        child.as_raw() as u32,
+                    ),
                 );
             }
             d
@@ -422,11 +452,13 @@ pub(super) fn handle_seccomp_notification(
             warn!("Approval backend error for seccomp notification: {}", e);
             record_denial(
                 denials,
-                DenialRecord {
-                    path: path.clone(),
+                DenialRecord::from_seccomp(
+                    path.clone(),
                     access,
-                    reason: DenialReason::BackendError,
-                },
+                    DenialReason::BackendError,
+                    syscall_type,
+                    child.as_raw() as u32,
+                ),
             );
             let _ = deny_notif(notify_fd, notif.id);
             return Ok(());
@@ -440,36 +472,53 @@ pub(super) fn handle_seccomp_notification(
     }
 
     // 10. Act on the decision
-    // Pass verified_digest to enable TOCTOU re-verification for instruction files
     if decision.is_granted() {
-        match open_path_for_access(
-            &path,
-            &access,
-            config.protected_roots,
-            verified_digest.as_deref(),
-            Some(procfs_context),
-        ) {
-            Ok(file) => {
-                if let Err(e) = inject_fd(notify_fd, notif.id, file.as_raw_fd()) {
-                    debug!(
-                        "inject_fd failed for approved path {}: {}",
+        if is_open_syscall {
+            // Open-type syscalls: open the path in the supervisor and inject the fd.
+            // Pass verified_digest to enable TOCTOU re-verification for instruction files.
+            match open_path_for_access(
+                &path,
+                &access,
+                config.protected_roots,
+                verified_digest.as_deref(),
+                Some(procfs_context),
+            ) {
+                Ok(file) => {
+                    if let Err(e) = inject_fd(notify_fd, notif.id, file.as_raw_fd()) {
+                        debug!(
+                            "inject_fd failed for approved path {}: {}",
+                            canonicalized.display(),
+                            e
+                        );
+                        let _ = deny_notif(notify_fd, notif.id);
+                    }
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to open approved path {}: {}",
                         canonicalized.display(),
                         e
                     );
-                    let _ = deny_notif(notify_fd, notif.id);
+                    if e.is_policy_blocked() {
+                        let _ = deny_notif(notify_fd, notif.id);
+                    } else {
+                        let _ = respond_notif_errno(notify_fd, notif.id, e.errno());
+                    }
                 }
             }
-            Err(e) => {
-                warn!(
-                    "Failed to open approved path {}: {}",
+        } else {
+            // Non-open syscalls (unlinkat, renameat2, etc.): let the kernel
+            // execute the original syscall. SECCOMP_USER_NOTIF_FLAG_CONTINUE is
+            // safe here because Landlock has already validated the path by the
+            // time the syscall reaches seccomp.
+            if let Err(e) = continue_notif(notify_fd, notif.id) {
+                debug!(
+                    "continue_notif failed for approved {} on {}: {}",
+                    syscall_type,
                     canonicalized.display(),
                     e
                 );
-                if e.is_policy_blocked() {
-                    let _ = deny_notif(notify_fd, notif.id);
-                } else {
-                    let _ = respond_notif_errno(notify_fd, notif.id, e.errno());
-                }
+                let _ = deny_notif(notify_fd, notif.id);
             }
         }
     } else {

@@ -16,6 +16,7 @@
 
 use crate::capability::{AccessMode, CapabilitySet, CapabilitySource};
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 /// Why a path access was denied during a supervised session.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,6 +33,104 @@ pub enum DenialReason {
     BackendError,
 }
 
+/// The syscall that triggered a denial, when known.
+///
+/// Enriches denial records beyond just the path and access mode so diagnostics
+/// can report *what operation* was attempted (e.g. "unlink /tmp/data.db" vs
+/// the generic "write access denied for /tmp/data.db").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeniedSyscall {
+    /// openat(dirfd, pathname, flags, mode)
+    Openat,
+    /// openat2(dirfd, pathname, how, size)
+    Openat2,
+    /// unlinkat(dirfd, pathname, flags)
+    Unlinkat,
+    /// renameat2(olddirfd, oldpath, newdirfd, newpath, flags)
+    Renameat2,
+    /// mkdirat(dirfd, pathname, mode)
+    Mkdirat,
+    /// fchmodat(dirfd, pathname, mode, flags)
+    Fchmodat,
+    /// symlinkat(target, newdirfd, linkpath)
+    Symlinkat,
+    /// linkat(olddirfd, oldpath, newdirfd, newpath, flags)
+    Linkat,
+    /// statx / newfstatat
+    Stat,
+    /// readlinkat(dirfd, pathname, buf, bufsiz)
+    Readlinkat,
+    /// faccessat2(dirfd, pathname, mode, flags)
+    Faccessat,
+}
+
+impl DeniedSyscall {
+    /// Human-readable verb describing the denied operation.
+    #[must_use]
+    pub fn action_verb(self) -> &'static str {
+        match self {
+            Self::Openat | Self::Openat2 => "open",
+            Self::Unlinkat => "delete",
+            Self::Renameat2 => "rename",
+            Self::Mkdirat => "create directory",
+            Self::Fchmodat => "change permissions on",
+            Self::Symlinkat => "create symlink to",
+            Self::Linkat => "create hard link to",
+            Self::Stat => "stat",
+            Self::Readlinkat => "read symlink",
+            Self::Faccessat => "access-check",
+        }
+    }
+
+    /// Human-readable syscall name for diagnostic output.
+    #[must_use]
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Openat => "openat",
+            Self::Openat2 => "openat2",
+            Self::Unlinkat => "unlinkat",
+            Self::Renameat2 => "renameat2",
+            Self::Mkdirat => "mkdirat",
+            Self::Fchmodat => "fchmodat",
+            Self::Symlinkat => "symlinkat",
+            Self::Linkat => "linkat",
+            Self::Stat => "statx",
+            Self::Readlinkat => "readlinkat",
+            Self::Faccessat => "faccessat2",
+        }
+    }
+}
+
+impl std::fmt::Display for DeniedSyscall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
+/// How a denial was detected, for cross-referencing and deduplication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DenialSource {
+    /// Captured via Linux seccomp-notify (authoritative, exact path).
+    SeccompNotify,
+    /// Inferred from the child's PTY/stderr output (best-effort).
+    PtyStderr,
+    /// Recovered from macOS Seatbelt unified log (asynchronous).
+    SeatbeltLog,
+    /// From an explicit IPC capability request over the supervisor socket.
+    SupervisorIpc,
+}
+
+impl std::fmt::Display for DenialSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::SeccompNotify => f.write_str("seccomp-notify"),
+            Self::PtyStderr => f.write_str("stderr"),
+            Self::SeatbeltLog => f.write_str("seatbelt-log"),
+            Self::SupervisorIpc => f.write_str("ipc"),
+        }
+    }
+}
+
 /// Record of a denied access attempt during a supervised session.
 #[derive(Debug, Clone)]
 pub struct DenialRecord {
@@ -41,6 +140,190 @@ pub struct DenialRecord {
     pub access: AccessMode,
     /// Why it was denied
     pub reason: DenialReason,
+    /// The syscall that triggered the denial, when known.
+    pub syscall: Option<DeniedSyscall>,
+    /// How the denial was detected.
+    pub source: DenialSource,
+    /// When the denial occurred (monotonic clock for deduplication).
+    pub timestamp: Instant,
+    /// PID of the child process that triggered the denial.
+    pub child_pid: u32,
+}
+
+impl DenialRecord {
+    /// Create a new denial record from a seccomp-notify interception.
+    #[must_use]
+    pub fn from_seccomp(
+        path: PathBuf,
+        access: AccessMode,
+        reason: DenialReason,
+        syscall: DeniedSyscall,
+        child_pid: u32,
+    ) -> Self {
+        Self {
+            path,
+            access,
+            reason,
+            syscall: Some(syscall),
+            source: DenialSource::SeccompNotify,
+            timestamp: Instant::now(),
+            child_pid,
+        }
+    }
+
+    /// Create a new denial record from a supervisor IPC request.
+    #[must_use]
+    pub fn from_ipc(
+        path: PathBuf,
+        access: AccessMode,
+        reason: DenialReason,
+        child_pid: u32,
+    ) -> Self {
+        Self {
+            path,
+            access,
+            reason,
+            syscall: None,
+            source: DenialSource::SupervisorIpc,
+            timestamp: Instant::now(),
+            child_pid,
+        }
+    }
+
+    /// Create a new denial record inferred from PTY/stderr output.
+    #[must_use]
+    pub fn from_stderr(path: PathBuf, access: AccessMode, child_pid: u32) -> Self {
+        Self {
+            path,
+            access,
+            reason: DenialReason::PolicyBlocked,
+            syscall: None,
+            source: DenialSource::PtyStderr,
+            timestamp: Instant::now(),
+            child_pid,
+        }
+    }
+
+    /// Create a basic denial record with only path, access, and reason.
+    ///
+    /// Sets source to `SeccompNotify`, syscall to `None`, child_pid to 0, and
+    /// timestamp to now. Useful for contexts where the enriched fields are not
+    /// available (e.g. IPC-based denials before the PoC migration is complete).
+    #[must_use]
+    pub fn basic(path: PathBuf, access: AccessMode, reason: DenialReason) -> Self {
+        Self {
+            path,
+            access,
+            reason,
+            syscall: None,
+            source: DenialSource::SeccompNotify,
+            timestamp: Instant::now(),
+            child_pid: 0,
+        }
+    }
+}
+
+/// Deduplicate denial records by path, merging access modes.
+///
+/// When multiple sources report denials for the same path within a short time
+/// window, this function merges them into a single record, preferring the most
+/// authoritative source (SeccompNotify > SupervisorIpc > SeatbeltLog > PtyStderr)
+/// and preserving the syscall type from the most specific record.
+///
+/// # Deduplication rules
+///
+/// - Records with the same path are grouped together.
+/// - Access modes are merged (Read + Write → ReadWrite).
+/// - The syscall field is preserved from the first record that has one.
+/// - The source field is set to the most authoritative source in the group.
+/// - The timestamp is set to the earliest in the group.
+/// - The child_pid is preserved from the first record.
+#[must_use]
+pub fn deduplicate_denials(denials: &[DenialRecord]) -> Vec<DenialRecord> {
+    use std::collections::HashMap;
+
+    // Group by (path, reason_tag) to avoid merging PolicyBlocked with UserDenied for the same path.
+    // We use a u8 tag since Discriminant doesn't implement Hash/Ord for non-Hash enums.
+    let mut groups: HashMap<(PathBuf, u8), DenialRecord> = HashMap::new();
+
+    for denial in denials {
+        let key = (denial.path.clone(), denial_reason_tag(&denial.reason));
+        groups
+            .entry(key)
+            .and_modify(|existing| {
+                // Merge access modes
+                existing.access = merge_access_modes(existing.access, denial.access);
+                // Prefer the most specific syscall
+                if existing.syscall.is_none() {
+                    existing.syscall = denial.syscall;
+                }
+                // Prefer the most authoritative source
+                if source_priority(denial.source) > source_priority(existing.source) {
+                    existing.source = denial.source;
+                }
+                // Use earliest timestamp
+                if denial.timestamp < existing.timestamp {
+                    existing.timestamp = denial.timestamp;
+                }
+            })
+            .or_insert_with(|| denial.clone());
+    }
+
+    groups.into_values().collect()
+}
+
+/// Map a `DenialReason` to a stable numeric tag for use as a hash map key.
+fn denial_reason_tag(reason: &DenialReason) -> u8 {
+    match reason {
+        DenialReason::PolicyBlocked => 0,
+        DenialReason::InsufficientAccess => 1,
+        DenialReason::UserDenied => 2,
+        DenialReason::RateLimited => 3,
+        DenialReason::BackendError => 4,
+    }
+}
+
+/// Priority ordering for denial sources (higher = more authoritative).
+fn source_priority(source: DenialSource) -> u8 {
+    match source {
+        DenialSource::SeccompNotify => 4,
+        DenialSource::SupervisorIpc => 3,
+        DenialSource::SeatbeltLog => 2,
+        DenialSource::PtyStderr => 1,
+    }
+}
+
+/// Enrich denial records with cross-referenced stderr observations.
+///
+/// For each `ObservedPathHint` from stderr analysis that does NOT already have a
+/// corresponding denial record from a more authoritative source (seccomp-notify,
+/// IPC), create a `DenialRecord` with `DenialSource::PtyStderr`. This captures
+/// Landlock denials that produce "Permission denied" in stderr but never trigger
+/// a seccomp notification.
+///
+/// Returns the original denials plus any new stderr-inferred records.
+#[must_use]
+pub fn enrich_with_stderr_hints(
+    denials: &[DenialRecord],
+    stderr_hints: &[ObservedPathHint],
+    child_pid: u32,
+) -> Vec<DenialRecord> {
+    let mut enriched = denials.to_vec();
+
+    for hint in stderr_hints {
+        let already_recorded = denials
+            .iter()
+            .any(|d| d.path == hint.path && d.access == hint.access);
+        if !already_recorded {
+            enriched.push(DenialRecord::from_stderr(
+                hint.path.clone(),
+                hint.access,
+                child_pid,
+            ));
+        }
+    }
+
+    enriched
 }
 
 /// Best-effort sandbox violation recovered from OS-native logging.
@@ -999,7 +1282,8 @@ impl<'a> DiagnosticFormatter<'a> {
                 if !policy_blocked.is_empty() {
                     for denial in &policy_blocked {
                         lines.push(format!(
-                            "[nono]   {} ({}) - blocked by security policy",
+                            "[nono]   {} {} ({}) - blocked by security policy",
+                            syscall_prefix(denial.syscall),
                             denial.path.display(),
                             access_str(denial.access),
                         ));
@@ -1008,7 +1292,8 @@ impl<'a> DiagnosticFormatter<'a> {
                 if !insufficient_access.is_empty() {
                     for denial in &insufficient_access {
                         lines.push(format!(
-                            "[nono]   {} ({}) - path matched the sandbox, but the access mode was not granted",
+                            "[nono]   {} {} ({}) - path matched the sandbox, but the access mode was not granted",
+                            syscall_prefix(denial.syscall),
                             denial.path.display(),
                             access_str(denial.access),
                         ));
@@ -1027,7 +1312,8 @@ impl<'a> DiagnosticFormatter<'a> {
                 if !user_denied.is_empty() {
                     for denial in &user_denied {
                         lines.push(format!(
-                            "[nono]   {} ({}) - access declined at the prompt",
+                            "[nono]   {} {} ({}) - access declined at the prompt",
+                            syscall_prefix(denial.syscall),
                             denial.path.display(),
                             access_str(denial.access),
                         ));
@@ -1036,7 +1322,8 @@ impl<'a> DiagnosticFormatter<'a> {
                 if !rate_limited.is_empty() {
                     for denial in &rate_limited {
                         lines.push(format!(
-                            "[nono]   {} ({}) - denied after too many approval requests",
+                            "[nono]   {} {} ({}) - denied after too many approval requests",
+                            syscall_prefix(denial.syscall),
                             denial.path.display(),
                             access_str(denial.access),
                         ));
@@ -1045,7 +1332,8 @@ impl<'a> DiagnosticFormatter<'a> {
                 if !backend_errors.is_empty() {
                     for denial in &backend_errors {
                         lines.push(format!(
-                            "[nono]   {} ({}) - denied because the approval backend failed",
+                            "[nono]   {} {} ({}) - denied because the approval backend failed",
+                            syscall_prefix(denial.syscall),
                             denial.path.display(),
                             access_str(denial.access),
                         ));
@@ -1103,6 +1391,10 @@ impl<'a> DiagnosticFormatter<'a> {
                 path,
                 access,
                 reason: reason.clone(),
+                syscall: None,
+                source: DenialSource::SeccompNotify,
+                timestamp: Instant::now(),
+                child_pid: 0,
             })
             .collect()
     }
@@ -1595,6 +1887,26 @@ fn access_str(access: AccessMode) -> &'static str {
         AccessMode::Read => "read",
         AccessMode::Write => "write",
         AccessMode::ReadWrite => "read+write",
+    }
+}
+
+/// Format a syscall name as a prefix for denial messages.
+///
+/// Returns the syscall's action verb (e.g. "delete", "rename") followed by a colon
+/// when a syscall is known, or an empty string for generic open operations or when
+/// the syscall is unknown. This gives users context like:
+///
+///   `delete /tmp/data.db (write) - blocked by security policy`
+///
+/// instead of the generic:
+///
+///   `/tmp/data.db (write) - blocked by security policy`
+fn syscall_prefix(syscall: Option<DeniedSyscall>) -> &'static str {
+    match syscall {
+        // Don't prefix open operations — they're the common case and
+        // the access mode (read/write) already conveys enough information.
+        Some(DeniedSyscall::Openat | DeniedSyscall::Openat2) | None => "",
+        Some(s) => s.action_verb(),
     }
 }
 
@@ -2573,11 +2885,11 @@ mod tests {
     #[test]
     fn test_supervised_policy_blocked_denial() {
         let caps = make_test_caps();
-        let denials = vec![DenialRecord {
-            path: PathBuf::from("/etc/shadow"),
-            access: AccessMode::Read,
-            reason: DenialReason::PolicyBlocked,
-        }];
+        let denials = vec![DenialRecord::basic(
+            PathBuf::from("/etc/shadow"),
+            AccessMode::Read,
+            DenialReason::PolicyBlocked,
+        )];
         let formatter = DiagnosticFormatter::new(&caps)
             .with_mode(DiagnosticMode::Supervised)
             .with_denials(&denials);
@@ -2594,11 +2906,11 @@ mod tests {
         let dir = tempdir().expect("tempdir should be created");
         let denied_path = dir.path().join("secret.txt");
         std::fs::write(&denied_path, "secret").expect("denied file should be created");
-        let denials = vec![DenialRecord {
-            path: denied_path.clone(),
-            access: AccessMode::Read,
-            reason: DenialReason::UserDenied,
-        }];
+        let denials = vec![DenialRecord::basic(
+            denied_path.clone(),
+            AccessMode::Read,
+            DenialReason::UserDenied,
+        )];
         let formatter = DiagnosticFormatter::new(&caps)
             .with_mode(DiagnosticMode::Supervised)
             .with_denials(&denials);
@@ -2614,16 +2926,16 @@ mod tests {
     fn test_supervised_mixed_denials() {
         let caps = make_test_caps();
         let denials = vec![
-            DenialRecord {
-                path: PathBuf::from("/etc/shadow"),
-                access: AccessMode::Read,
-                reason: DenialReason::PolicyBlocked,
-            },
-            DenialRecord {
-                path: PathBuf::from("/home/user/data.txt"),
-                access: AccessMode::Read,
-                reason: DenialReason::UserDenied,
-            },
+            DenialRecord::basic(
+                PathBuf::from("/etc/shadow"),
+                AccessMode::Read,
+                DenialReason::PolicyBlocked,
+            ),
+            DenialRecord::basic(
+                PathBuf::from("/home/user/data.txt"),
+                AccessMode::Read,
+                DenialReason::UserDenied,
+            ),
         ];
         let formatter = DiagnosticFormatter::new(&caps)
             .with_mode(DiagnosticMode::Supervised)
@@ -2640,16 +2952,16 @@ mod tests {
     fn test_supervised_deduplicates_paths() {
         let caps = make_test_caps();
         let denials = vec![
-            DenialRecord {
-                path: PathBuf::from("/etc/shadow"),
-                access: AccessMode::Read,
-                reason: DenialReason::PolicyBlocked,
-            },
-            DenialRecord {
-                path: PathBuf::from("/etc/shadow"),
-                access: AccessMode::Read,
-                reason: DenialReason::PolicyBlocked,
-            },
+            DenialRecord::basic(
+                PathBuf::from("/etc/shadow"),
+                AccessMode::Read,
+                DenialReason::PolicyBlocked,
+            ),
+            DenialRecord::basic(
+                PathBuf::from("/etc/shadow"),
+                AccessMode::Read,
+                DenialReason::PolicyBlocked,
+            ),
         ];
         let formatter = DiagnosticFormatter::new(&caps)
             .with_mode(DiagnosticMode::Supervised)
@@ -2665,11 +2977,11 @@ mod tests {
     #[test]
     fn test_supervised_has_block_header() {
         let caps = make_test_caps();
-        let denials = vec![DenialRecord {
-            path: PathBuf::from("/etc/shadow"),
-            access: AccessMode::Read,
-            reason: DenialReason::PolicyBlocked,
-        }];
+        let denials = vec![DenialRecord::basic(
+            PathBuf::from("/etc/shadow"),
+            AccessMode::Read,
+            DenialReason::PolicyBlocked,
+        )];
         let formatter = DiagnosticFormatter::new(&caps)
             .with_mode(DiagnosticMode::Supervised)
             .with_denials(&denials);
@@ -2682,11 +2994,11 @@ mod tests {
     #[test]
     fn test_supervised_rate_limited_denial() {
         let caps = make_test_caps();
-        let denials = vec![DenialRecord {
-            path: PathBuf::from("/tmp/flood"),
-            access: AccessMode::Read,
-            reason: DenialReason::RateLimited,
-        }];
+        let denials = vec![DenialRecord::basic(
+            PathBuf::from("/tmp/flood"),
+            AccessMode::Read,
+            DenialReason::RateLimited,
+        )];
         let formatter = DiagnosticFormatter::new(&caps)
             .with_mode(DiagnosticMode::Supervised)
             .with_denials(&denials);
@@ -2715,11 +3027,11 @@ mod tests {
             source: CapabilitySource::Group("project_read".to_string()),
         });
 
-        let denials = vec![DenialRecord {
-            path: denied_path.clone(),
-            access: AccessMode::Write,
-            reason: DenialReason::InsufficientAccess,
-        }];
+        let denials = vec![DenialRecord::basic(
+            denied_path.clone(),
+            AccessMode::Write,
+            DenialReason::InsufficientAccess,
+        )];
         let formatter = DiagnosticFormatter::new(&caps)
             .with_mode(DiagnosticMode::Supervised)
             .with_denials(&denials);

@@ -146,6 +146,13 @@ impl ScreenState {
     }
 }
 
+/// Maximum size of the denial capture ring buffer (64 KB).
+///
+/// Keeps the last N bytes of PTY output for cross-referencing with seccomp-notify
+/// denials. When a denial occurs, the supervisor can scan this buffer for the
+/// denied path to correlate kernel-level denials with user-visible error messages.
+const DENIAL_CAPTURE_LIMIT: usize = 64 * 1024;
+
 /// The running PTY proxy state managed by the supervisor.
 pub struct PtyProxy {
     /// PTY master fd
@@ -174,6 +181,13 @@ pub struct PtyProxy {
     pending_detach_escape: Vec<u8>,
     /// In-band detach requested from the attached client.
     detach_requested: bool,
+    /// Ring buffer of recent PTY output for denial cross-referencing.
+    ///
+    /// Captures the last [`DENIAL_CAPTURE_LIMIT`] bytes of raw child output.
+    /// When a seccomp-notify denial occurs, the supervisor can search this
+    /// buffer for the denied path to correlate kernel denials with the
+    /// child's error messages (e.g. "Permission denied: /path/to/file").
+    denial_capture: VecDeque<u8>,
 }
 
 /// Open a PTY pair, inheriting the current terminal's window size.
@@ -296,6 +310,7 @@ impl PtyProxy {
             pending_detach_match_len: 0,
             pending_detach_escape: Vec::new(),
             detach_requested: false,
+            denial_capture: VecDeque::with_capacity(DENIAL_CAPTURE_LIMIT),
         })
     }
 
@@ -718,6 +733,9 @@ impl PtyProxy {
         let first_output = self.scrollback.is_empty();
         self.screen.apply_bytes(bytes);
 
+        // Feed the denial capture ring buffer (used for cross-referencing).
+        self.feed_denial_capture(bytes);
+
         if bytes.len() >= SCROLLBACK_LIMIT_BYTES {
             self.scrollback.clear();
             self.scrollback.extend(
@@ -751,6 +769,62 @@ impl PtyProxy {
                 bytes.len()
             );
         }
+    }
+
+    /// Feed bytes into the denial capture ring buffer.
+    fn feed_denial_capture(&mut self, bytes: &[u8]) {
+        if bytes.len() >= DENIAL_CAPTURE_LIMIT {
+            // Input larger than the buffer: keep only the tail.
+            self.denial_capture.clear();
+            self.denial_capture.extend(
+                bytes[bytes.len().saturating_sub(DENIAL_CAPTURE_LIMIT)..]
+                    .iter()
+                    .copied(),
+            );
+            return;
+        }
+        let overflow = self
+            .denial_capture
+            .len()
+            .saturating_add(bytes.len())
+            .saturating_sub(DENIAL_CAPTURE_LIMIT);
+        if overflow > 0 {
+            drop(self.denial_capture.drain(..overflow));
+        }
+        self.denial_capture.extend(bytes.iter().copied());
+    }
+
+    /// Check whether the denial capture buffer contains a reference to the given path.
+    ///
+    /// This is used by the denial pipeline to cross-reference seccomp-notify denials
+    /// with the child's stderr output. If a denied path appears in the recent PTY
+    /// output alongside an error keyword, the denial record's confidence is higher
+    /// and can be presented to the user with more context.
+    ///
+    /// Returns `true` if the path string appears in the captured output.
+    pub fn denial_capture_contains_path(&self, path: &std::path::Path) -> bool {
+        let path_bytes = path.as_os_str().as_encoded_bytes();
+        if path_bytes.is_empty() {
+            return false;
+        }
+        // Convert the ring buffer to a contiguous slice pair and search both.
+        let (front, back) = self.denial_capture.as_slices();
+        contains_subsequence(front, path_bytes)
+            || contains_subsequence(back, path_bytes)
+            || cross_boundary_contains(front, back, path_bytes)
+    }
+
+    /// Render the denial capture buffer as a lossy UTF-8 string for analysis.
+    ///
+    /// Called by the denial pipeline after child exit to scan for error patterns
+    /// that weren't caught by seccomp-notify (e.g. Landlock denials that produce
+    /// "Permission denied" in stderr but never trigger a seccomp notification).
+    pub fn denial_capture_plaintext(&self) -> String {
+        let (front, back) = self.denial_capture.as_slices();
+        let mut buf = Vec::with_capacity(front.len().saturating_add(back.len()));
+        buf.extend_from_slice(front);
+        buf.extend_from_slice(back);
+        String::from_utf8_lossy(&buf).into_owned()
     }
 
     fn scrollback_snapshot(&self) -> Vec<u8> {
@@ -1939,11 +2013,48 @@ fn run_attach_loop(
     Ok(())
 }
 
+/// Check if `haystack` contains `needle` as a contiguous subsequence.
+fn contains_subsequence(haystack: &[u8], needle: &[u8]) -> bool {
+    if needle.is_empty() {
+        return true;
+    }
+    if haystack.len() < needle.len() {
+        return false;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|window| window == needle)
+}
+
+/// Check if `needle` spans the boundary between `front` and `back`.
+///
+/// This handles the case where the VecDeque's ring buffer wraps around and
+/// the path string straddles the two contiguous slices.
+fn cross_boundary_contains(front: &[u8], back: &[u8], needle: &[u8]) -> bool {
+    if needle.len() <= 1 || front.is_empty() || back.is_empty() {
+        return false;
+    }
+    // Check each possible split point where the needle spans front/back.
+    for split in 1..needle.len() {
+        let prefix = &needle[..split];
+        let suffix = &needle[split..];
+        if front.len() >= prefix.len()
+            && back.len() >= suffix.len()
+            && front[front.len() - prefix.len()..] == *prefix
+            && back[..suffix.len()] == *suffix
+        {
+            return true;
+        }
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        read_fd_once, select_attach_replay_bytes, terminal_restore_escape, write_all_fd,
-        AttachedClient, PtyProxy, ReadFdOutcome, ScreenState, DEFAULT_DETACH_SEQUENCE,
+        contains_subsequence, cross_boundary_contains, read_fd_once, select_attach_replay_bytes,
+        terminal_restore_escape, write_all_fd, AttachedClient, PtyProxy, ReadFdOutcome,
+        ScreenState, DEFAULT_DETACH_SEQUENCE,
     };
     use nix::libc;
     use std::collections::VecDeque;
@@ -1973,6 +2084,7 @@ mod tests {
             pending_detach_match_len: 0,
             pending_detach_escape: Vec::new(),
             detach_requested: false,
+            denial_capture: VecDeque::new(),
         }
     }
 
@@ -2271,5 +2383,67 @@ mod tests {
 
         assert!(proxy.proxy_master_to_client());
         assert!(proxy.client.is_none());
+    }
+
+    // --- Denial capture ring buffer tests ---
+
+    #[test]
+    fn test_contains_subsequence_basic() {
+        assert!(contains_subsequence(b"hello world", b"world"));
+        assert!(contains_subsequence(b"hello world", b"hello"));
+        assert!(!contains_subsequence(b"hello world", b"xyz"));
+        assert!(contains_subsequence(b"abc", b""));
+        assert!(!contains_subsequence(b"ab", b"abc"));
+    }
+
+    #[test]
+    fn test_cross_boundary_contains() {
+        // Path spans across front/back boundary
+        assert!(cross_boundary_contains(
+            b"Permission denied: /etc/sha",
+            b"dow",
+            b"/etc/shadow"
+        ));
+        // Entire needle in front — should not match (that's contains_subsequence's job)
+        assert!(!cross_boundary_contains(
+            b"/etc/shadow",
+            b"extra",
+            b"/etc/shadow"
+        ));
+        // Empty slices
+        assert!(!cross_boundary_contains(b"", b"", b"/etc/shadow"));
+        assert!(!cross_boundary_contains(b"a", b"b", b"x"));
+    }
+
+    #[test]
+    fn test_denial_capture_feed_and_search() {
+        let mut proxy = build_test_proxy(&DEFAULT_DETACH_SEQUENCE);
+
+        // Feed some output simulating an error message
+        proxy.feed_denial_capture(b"bash: /etc/shadow: Permission denied\n");
+
+        // The denied path should be findable
+        assert!(proxy.denial_capture_contains_path(std::path::Path::new("/etc/shadow")));
+        // A path that wasn't mentioned should not be found
+        assert!(!proxy.denial_capture_contains_path(std::path::Path::new("/etc/passwd")));
+    }
+
+    #[test]
+    fn test_denial_capture_ring_buffer_overflow() {
+        let mut proxy = build_test_proxy(&DEFAULT_DETACH_SEQUENCE);
+
+        // Fill the buffer beyond DENIAL_CAPTURE_LIMIT
+        let big_chunk = vec![b'X'; super::DENIAL_CAPTURE_LIMIT + 100];
+        proxy.feed_denial_capture(&big_chunk);
+
+        assert_eq!(proxy.denial_capture.len(), super::DENIAL_CAPTURE_LIMIT);
+    }
+
+    #[test]
+    fn test_denial_capture_plaintext() {
+        let mut proxy = build_test_proxy(&DEFAULT_DETACH_SEQUENCE);
+        proxy.feed_denial_capture(b"error: Permission denied\n");
+        let text = proxy.denial_capture_plaintext();
+        assert!(text.contains("Permission denied"));
     }
 }
