@@ -29,7 +29,7 @@ pub enum NonoError {
     #[error("No command specified")]
     NoCommand,
 
-    #[error("CWD access requires --allow-cwd in silent mode")]
+    #[error("CWD access requires --allow-cwd in non-interactive mode")]
     CwdPromptRequired,
 
     // Sandbox errors
