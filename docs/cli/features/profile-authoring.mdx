@@ -108,7 +108,7 @@ With `--full`, additional sections are included as empty stubs for all additive 
 ```
 
 <Note>
-  Fields that would override inherited behavior are intentionally omitted from the skeleton: `network_profile` (emitting `null` would clear an inherited proxy profile), `open_urls` (would replace inherited OAuth2 origins), and `allow_launch_services` (would override inherited browser-opening permissions). Add these explicitly only when you intend to change the inherited behavior.
+  Fields that would override inherited behavior are intentionally omitted from the skeleton: `network_profile` (emitting `null` would clear an inherited proxy profile), `open_urls` (would replace inherited OAuth2 origins), `allow_launch_services` (would override inherited browser-opening permissions), and `allow_gpu` (would override inherited GPU access). Add these explicitly only when you intend to change the inherited behavior.
 </Note>
 
 ### Validation
