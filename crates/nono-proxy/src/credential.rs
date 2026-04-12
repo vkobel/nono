@@ -13,7 +13,7 @@ use crate::config::{InjectMode, RouteConfig};
 use crate::error::{ProxyError, Result};
 use base64::Engine;
 use std::collections::HashMap;
-use tracing::debug;
+use tracing::{debug, warn};
 use zeroize::Zeroizing;
 
 /// A loaded credential ready for injection.
@@ -94,10 +94,18 @@ impl CredentialStore {
 
                 let secret = match nono::keystore::load_secret_by_ref(KEYRING_SERVICE, key) {
                     Ok(s) => s,
-                    Err(nono::NonoError::SecretNotFound(msg)) => {
-                        debug!(
-                            "Credential '{}' not available, skipping route: {}",
-                            normalized_prefix, msg
+                    Err(nono::NonoError::SecretNotFound(_)) => {
+                        let hint = if !key.contains("://") && cfg!(target_os = "macos") {
+                            format!(
+                                " To add it to the macOS keychain: security add-generic-password -s \"nono\" -a \"{}\" -w",
+                                key
+                            )
+                        } else {
+                            String::new()
+                        };
+                        warn!(
+                            "Credential '{}' not found for route '{}' — requests will proceed without credential injection.{}",
+                            key, normalized_prefix, hint
                         );
                         continue;
                     }
