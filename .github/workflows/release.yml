@@ -215,7 +215,6 @@ jobs:
           - always-further/nono-py
           - always-further/nono-ts
           - always-further/nono-go
-          - always-further/nono-registry
           - always-further/nono-docs
     steps:
       - name: Dispatch to ${{ matrix.repo }}
