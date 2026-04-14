@@ -171,7 +171,14 @@
       "inject_header": "x-api-key",
       "credential_format": "{}",
       "credential_key": "env://ANTHROPIC_API_KEY",
-      "env_var": "ANTHROPIC_API_KEY"
+      "env_var": "ANTHROPIC_API_KEY",
+      "inject_overrides": [
+        {
+          "prefix": "sk-ant-oat",
+          "inject_header": "Authorization",
+          "credential_format": "Bearer {}"
+        }
+      ]
     },
     "gemini": {
       "upstream": "https://generativelanguage.googleapis.com",

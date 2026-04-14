@@ -152,8 +152,33 @@ Define a custom reverse proxy credential route for services not in `network-poli
 | `tls_ca`            | string (path)   | no          | Path to a PEM-encoded CA certificate. Use for upstreams with self-signed or private CA certs (e.g. a Kubernetes API server). |
 | `tls_client_cert`   | string (path)   | no          | Path to a PEM-encoded client certificate for mutual TLS (mTLS). Must be set together with `tls_client_key`. |
 | `tls_client_key`    | string (path)   | no          | Path to the PEM-encoded private key matching `tls_client_cert`. |
+| `inject_overrides`  | array           | no          | Prefix-based outbound injection overrides (see below). |
 
 `proxy` overrides apply only to how the local proxy validates incoming phantom tokens from the sandboxed process. Outbound upstream credential injection continues to use top-level fields.
+
+`inject_overrides` selects `inject_header` and `credential_format` based on the credential value's prefix. The first matching entry wins; if none match, the route's top-level values are used. This is useful when a single credential env var may hold tokens of different shapes — for example, an Anthropic API key (`sk-ant-api...`) vs a Claude Code OAuth token (`sk-ant-oat...`):
+
+```json
+{
+  "upstream": "https://api.anthropic.com",
+  "credential_key": "env://ANTHROPIC_API_KEY",
+  "inject_header": "x-api-key",
+  "credential_format": "{}",
+  "inject_overrides": [
+    { "prefix": "sk-ant-oat", "inject_header": "Authorization", "credential_format": "Bearer {}" }
+  ]
+}
+```
+
+A Claude Code OAuth token is injected as `Authorization: Bearer <token>`; a regular API key falls through to `x-api-key`.
+
+Each `inject_overrides` entry:
+
+| Field | Required | Default | Description |
+|---|---|---|---|
+| `prefix` | yes | — | Credential value prefix to match |
+| `inject_header` | yes | — | HTTP header to inject into when prefix matches |
+| `credential_format` | no | `Bearer {}` | Format string; `{}` replaced with the credential |
 
 ### env_credentials (alias: secrets)
 

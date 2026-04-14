@@ -461,6 +461,33 @@
             { "type": "null" }
           ],
           "description": "Path to the PEM-encoded private key corresponding to tls_client_cert. Must be set together with tls_client_cert."
+        },
+        "inject_overrides": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/InjectOverride" },
+          "description": "Prefix-based outbound injection overrides. The first entry whose prefix matches the start of the loaded credential value overrides inject_header and credential_format for upstream injection. Falls through to route defaults if no entry matches.",
+          "default": []
+        }
+      }
+    },
+    "InjectOverride": {
+      "type": "object",
+      "description": "Overrides inject_header and credential_format for upstream injection when the loaded credential value starts with the given prefix. Useful when a single credential env var may hold tokens of different shapes (e.g. Anthropic API keys vs Claude Code OAuth tokens).",
+      "additionalProperties": false,
+      "required": ["prefix", "inject_header"],
+      "properties": {
+        "prefix": {
+          "type": "string",
+          "description": "Credential value prefix to match (e.g. \"sk-ant-oat\" for Claude Code OAuth tokens obtained via `claude setup-token`)."
+        },
+        "inject_header": {
+          "type": "string",
+          "description": "HTTP header name to inject the credential into when the prefix matches (e.g. \"Authorization\")."
+        },
+        "credential_format": {
+          "type": "string",
+          "description": "Format string with {} placeholder used when the prefix matches. Default: \"Bearer {}\".",
+          "default": "Bearer {}"
         }
       }
     },
