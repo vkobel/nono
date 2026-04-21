@@ -1,0 +1,28 @@
+{
+  "meta": {
+    "name": "claude-code-keychain-oauth",
+    "description": "Example Claude Code profile for macOS Keychain-backed OAuth token proxying"
+  },
+  "extends": "claude-code",
+  "network": {
+    "network_profile": "minimal",
+    "credentials": ["anthropic"],
+    "custom_credentials": {
+      "anthropic": {
+        "upstream": "https://api.anthropic.com",
+        "credential_key": "anthropic_api_key",
+        "inject_header": "x-api-key",
+        "credential_format": "{}",
+        "inject_overrides": [
+          {
+            "prefix": "sk-ant-oat",
+            "inject_header": "Authorization",
+            "credential_format": "Bearer {}",
+            "env_var": "CLAUDE_CODE_OAUTH_TOKEN",
+            "proxy_inject_header": "Authorization"
+          }
+        ]
+      }
+    }
+  }
+}

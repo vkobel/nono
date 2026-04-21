@@ -38,6 +38,8 @@ pub struct LoadedCredential {
     pub proxy_header_name: String,
     /// Formatted header value (e.g., "Bearer sk-...")
     pub header_value: Zeroizing<String>,
+    /// Child environment variable to receive the phantom token.
+    pub env_var: Option<String>,
 
     // --- URL path mode ---
     /// Pattern to match in incoming path (with {} placeholder)
@@ -65,6 +67,7 @@ impl std::fmt::Debug for LoadedCredential {
             .field("header_name", &self.header_name)
             .field("proxy_header_name", &self.proxy_header_name)
             .field("header_value", &"[REDACTED]")
+            .field("env_var", &self.env_var)
             .field("path_pattern", &self.path_pattern)
             .field("proxy_path_pattern", &self.proxy_path_pattern)
             .field("path_replacement", &self.path_replacement)
@@ -155,8 +158,21 @@ impl CredentialStore {
                     route.credential_format.clone()
                 };
 
+                // Apply inject_overrides: if the credential value starts with a
+                // registered prefix, override upstream injection and optionally
+                // the child-side phantom token env/header. The smart default
+                // above runs first so the base format is consistent; the override
+                // always wins when a prefix matches.
+                let matched_override = route
+                    .inject_overrides
+                    .iter()
+                    .find(|o| secret.starts_with(o.prefix.as_str()));
+                let (final_header, final_format) = matched_override
+                    .map(|o| (o.inject_header.as_str(), o.credential_format.as_str()))
+                    .unwrap_or((&route.inject_header, effective_format.as_str()));
+
                 let header_value = match route.inject_mode {
-                    InjectMode::Header => Zeroizing::new(effective_format.replace("{}", &secret)),
+                    InjectMode::Header => Zeroizing::new(final_format.replace("{}", &secret)),
                     InjectMode::BasicAuth => {
                         // Base64 encode the credential for Basic auth
                         let encoded =
@@ -177,13 +193,15 @@ impl CredentialStore {
                             .and_then(|p| p.inject_mode.clone())
                             .unwrap_or_else(|| route.inject_mode.clone()),
                         raw_credential: secret,
-                        header_name: route.inject_header.clone(),
-                        proxy_header_name: route
-                            .proxy
-                            .as_ref()
-                            .and_then(|p| p.inject_header.clone())
+                        header_name: final_header.to_string(),
+                        proxy_header_name: matched_override
+                            .and_then(|o| o.proxy_inject_header.clone())
+                            .or_else(|| route.proxy.as_ref().and_then(|p| p.inject_header.clone()))
                             .unwrap_or_else(|| route.inject_header.clone()),
                         header_value,
+                        env_var: matched_override
+                            .and_then(|o| o.env_var.clone())
+                            .or_else(|| route.env_var.clone()),
                         path_pattern: route.path_pattern.clone(),
                         proxy_path_pattern: route
                             .proxy
@@ -314,6 +332,24 @@ impl CredentialStore {
             .cloned()
             .collect()
     }
+
+    /// Returns each loaded route's child env var override, if one was configured.
+    ///
+    /// Covers both credential routes (may have a specific env var from an
+    /// `inject_override` match) and OAuth2 routes (always `None` — they use
+    /// the standard route `env_var` fallback in the caller).
+    #[must_use]
+    pub fn loaded_env_vars(&self) -> HashMap<String, Option<String>> {
+        let cred_vars = self
+            .credentials
+            .iter()
+            .map(|(prefix, cred)| (prefix.clone(), cred.env_var.clone()));
+        let oauth2_vars = self
+            .oauth2_routes
+            .keys()
+            .map(|prefix| (prefix.clone(), None));
+        cred_vars.chain(oauth2_vars).collect()
+    }
 }
 
 /// The keyring service name used by nono for all credentials.
@@ -324,6 +360,7 @@ const KEYRING_SERVICE: &str = nono::keystore::DEFAULT_SERVICE;
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::config::InjectOverride;
     use std::sync::{Arc, Mutex};
 
     static ENV_LOCK: Mutex<()> = Mutex::new(());
@@ -396,6 +433,7 @@ mod tests {
             header_name: "Authorization".to_string(),
             proxy_header_name: "Authorization".to_string(),
             header_value: Zeroizing::new("Bearer sk-secret-12345".to_string()),
+            env_var: None,
             path_pattern: None,
             proxy_path_pattern: None,
             path_replacement: None,
@@ -438,6 +476,7 @@ mod tests {
             path_replacement: None,
             query_param_name: None,
             proxy: None,
+            inject_overrides: vec![],
             env_var: None,
             endpoint_rules: vec![],
             tls_ca: None,
@@ -533,6 +572,7 @@ mod tests {
             path_replacement: None,
             query_param_name: None,
             proxy: None,
+            inject_overrides: vec![],
             env_var: Some("MY_API_KEY".to_string()),
             endpoint_rules: vec![],
             tls_ca: None,
@@ -577,5 +617,136 @@ mod tests {
         };
 
         TokenCache::new_from_parts(config, test_tls_connector(), token, ttl)
+    }
+
+    /// Build a minimal RouteConfig with inject_overrides for unit tests.
+    fn route_with_overrides(overrides: Vec<InjectOverride>) -> RouteConfig {
+        RouteConfig {
+            prefix: "test".to_string(),
+            upstream: "https://example.com".to_string(),
+            credential_key: None,
+            inject_mode: InjectMode::Header,
+            inject_header: "x-api-key".to_string(),
+            credential_format: "{}".to_string(),
+            path_pattern: None,
+            path_replacement: None,
+            query_param_name: None,
+            proxy: None,
+            inject_overrides: overrides,
+            env_var: None,
+            endpoint_rules: vec![],
+            tls_ca: None,
+            tls_client_cert: None,
+            tls_client_key: None,
+            oauth2: None,
+        }
+    }
+
+    #[test]
+    fn test_inject_override_no_match_falls_through() {
+        // Credential doesn't match any prefix — route defaults apply.
+        let route = route_with_overrides(vec![InjectOverride {
+            prefix: "sk-ant-oat".to_string(),
+            inject_header: "Authorization".to_string(),
+            credential_format: "Bearer {}".to_string(),
+            env_var: None,
+            proxy_inject_header: None,
+        }]);
+        // Simulate what load() does when effective_format and overrides are resolved:
+        let secret = "sk-ant-api-regular-key";
+        let overrides = &route.inject_overrides;
+        let effective_format = "{}";
+        let (final_header, final_format) = overrides
+            .iter()
+            .find(|o| secret.starts_with(o.prefix.as_str()))
+            .map(|o| (o.inject_header.as_str(), o.credential_format.as_str()))
+            .unwrap_or((&route.inject_header, effective_format));
+
+        assert_eq!(final_header, "x-api-key");
+        assert_eq!(final_format.replace("{}", secret), secret);
+    }
+
+    #[test]
+    fn test_inject_override_oauth_token_matches() {
+        // OAuth token starts with "sk-ant-oat" — override selects Authorization: Bearer.
+        let route = route_with_overrides(vec![InjectOverride {
+            prefix: "sk-ant-oat".to_string(),
+            inject_header: "Authorization".to_string(),
+            credential_format: "Bearer {}".to_string(),
+            env_var: Some("CLAUDE_CODE_OAUTH_TOKEN".to_string()),
+            proxy_inject_header: Some("Authorization".to_string()),
+        }]);
+        let secret = "sk-ant-oat01-abc123";
+        let overrides = &route.inject_overrides;
+        let effective_format = "{}";
+        let (final_header, final_format) = overrides
+            .iter()
+            .find(|o| secret.starts_with(o.prefix.as_str()))
+            .map(|o| (o.inject_header.as_str(), o.credential_format.as_str()))
+            .unwrap_or((&route.inject_header, effective_format));
+
+        assert_eq!(final_header, "Authorization");
+        assert_eq!(
+            final_format.replace("{}", secret),
+            format!("Bearer {}", secret)
+        );
+    }
+
+    #[test]
+    fn test_inject_override_first_match_wins() {
+        // Two overrides — first matching prefix wins.
+        let route = route_with_overrides(vec![
+            InjectOverride {
+                prefix: "sk-ant-oat".to_string(),
+                inject_header: "Authorization".to_string(),
+                credential_format: "Bearer {}".to_string(),
+                env_var: None,
+                proxy_inject_header: None,
+            },
+            InjectOverride {
+                prefix: "sk-ant".to_string(),
+                inject_header: "x-fallback".to_string(),
+                credential_format: "{}".to_string(),
+                env_var: None,
+                proxy_inject_header: None,
+            },
+        ]);
+        let secret = "sk-ant-oat01-abc123";
+        let overrides = &route.inject_overrides;
+        let (final_header, _) = overrides
+            .iter()
+            .find(|o| secret.starts_with(o.prefix.as_str()))
+            .map(|o| (o.inject_header.as_str(), o.credential_format.as_str()))
+            .unwrap_or((&route.inject_header, "{}"));
+
+        // First entry ("sk-ant-oat") matches, "sk-ant" is never reached.
+        assert_eq!(final_header, "Authorization");
+    }
+
+    #[test]
+    fn test_inject_override_serde_roundtrip() {
+        // Verify InjectOverride serialises/deserialises without data loss.
+        let o = InjectOverride {
+            prefix: "sk-ant-oat".to_string(),
+            inject_header: "Authorization".to_string(),
+            credential_format: "Bearer {}".to_string(),
+            env_var: Some("CLAUDE_CODE_OAUTH_TOKEN".to_string()),
+            proxy_inject_header: Some("Authorization".to_string()),
+        };
+        let json = serde_json::to_string(&o).unwrap();
+        let back: InjectOverride = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.prefix, "sk-ant-oat");
+        assert_eq!(back.inject_header, "Authorization");
+        assert_eq!(back.credential_format, "Bearer {}");
+        assert_eq!(back.env_var, Some("CLAUDE_CODE_OAUTH_TOKEN".to_string()));
+        assert_eq!(back.proxy_inject_header, Some("Authorization".to_string()));
+    }
+
+    #[test]
+    fn test_inject_override_default_format_is_bearer() {
+        // When credential_format is omitted, it defaults to "Bearer {}".
+        let json = r#"{"prefix":"sk-ant-oat","inject_header":"Authorization"}"#;
+        let o: InjectOverride = serde_json::from_str(json).unwrap();
+        assert_eq!(o.credential_format, "Bearer {}");
     }
 }
