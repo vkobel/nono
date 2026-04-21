@@ -43,10 +43,9 @@ pub struct ProxyHandle {
     audit_log: audit::SharedAuditLog,
     /// Send `true` to trigger graceful shutdown
     shutdown_tx: watch::Sender<bool>,
-    /// Route prefixes that have credentials actually loaded.
-    /// Routes whose credentials were unavailable are excluded so we
-    /// don't inject phantom tokens that shadow valid external credentials.
-    loaded_routes: std::collections::HashSet<String>,
+    /// Loaded credential route prefixes mapped to the env var that should
+    /// receive the phantom token.
+    loaded_env_vars: std::collections::HashMap<String, Option<String>>,
     /// Non-credential allowed hosts that should bypass the proxy (NO_PROXY).
     /// Computed at startup: `allowed_hosts` minus credential upstream hosts.
     no_proxy_hosts: Vec<String>,
@@ -140,14 +139,16 @@ impl ProxyHandle {
             // were actually loaded. If a credential was unavailable (e.g.,
             // GITHUB_TOKEN env var not set), injecting a phantom token would
             // shadow valid credentials from other sources (keyring, gh auth).
-            if !self.loaded_routes.contains(prefix) {
+            let Some(loaded_env_var) = self.loaded_env_vars.get(prefix) else {
                 continue;
-            }
+            };
 
             // API key set to session token (phantom token pattern).
             // Use explicit env_var if set (required for URI manager refs), otherwise
             // fall back to uppercasing the credential_key (e.g., "openai_api_key" -> "OPENAI_API_KEY").
-            if let Some(ref env_var) = route.env_var {
+            if let Some(env_var) = loaded_env_var {
+                vars.push((env_var.clone(), self.token.to_string()));
+            } else if let Some(ref env_var) = route.env_var {
                 vars.push((env_var.clone(), self.token.to_string()));
             } else if let Some(ref cred_key) = route.credential_key {
                 // Skip URI-format keys (e.g. env://, op://, apple-password://) —
@@ -226,7 +227,7 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
     } else {
         CredentialStore::load(&config.routes)?
     };
-    let loaded_routes = credential_store.loaded_prefixes();
+    let loaded_env_vars = credential_store.loaded_env_vars();
 
     // Build filter
     let filter = if config.allowed_hosts.is_empty() {
@@ -325,7 +326,7 @@ pub async fn start(config: ProxyConfig) -> Result<ProxyHandle> {
         token: session_token,
         audit_log,
         shutdown_tx,
-        loaded_routes,
+        loaded_env_vars,
         no_proxy_hosts,
     })
 }
@@ -635,7 +636,7 @@ mod tests {
             token: Zeroizing::new("test_token".to_string()),
             audit_log: audit::new_audit_log(),
             shutdown_tx,
-            loaded_routes: ["openai".to_string()].into_iter().collect(),
+            loaded_env_vars: [("openai".to_string(), None)].into_iter().collect(),
             no_proxy_hosts: Vec::new(),
         };
         let config = ProxyConfig {
@@ -689,7 +690,9 @@ mod tests {
             token: Zeroizing::new("test_token".to_string()),
             audit_log: audit::new_audit_log(),
             shutdown_tx,
-            loaded_routes: ["openai".to_string()].into_iter().collect(),
+            loaded_env_vars: [("openai".to_string(), Some("OPENAI_API_KEY".to_string()))]
+                .into_iter()
+                .collect(),
             no_proxy_hosts: Vec::new(),
         };
         let config = ProxyConfig {
@@ -736,6 +739,51 @@ mod tests {
     }
 
     #[test]
+    fn test_proxy_credential_env_vars_uses_loaded_override_env_var() {
+        let (shutdown_tx, _) = tokio::sync::watch::channel(false);
+        let handle = ProxyHandle {
+            port: 12345,
+            token: Zeroizing::new("test_token".to_string()),
+            audit_log: audit::new_audit_log(),
+            shutdown_tx,
+            loaded_env_vars: [(
+                "anthropic".to_string(),
+                Some("CLAUDE_CODE_OAUTH_TOKEN".to_string()),
+            )]
+            .into_iter()
+            .collect(),
+            no_proxy_hosts: Vec::new(),
+        };
+        let config = ProxyConfig {
+            routes: vec![crate::config::RouteConfig {
+                prefix: "anthropic".to_string(),
+                upstream: "https://api.anthropic.com".to_string(),
+                credential_key: Some("anthropic_api_key".to_string()),
+                inject_mode: crate::config::InjectMode::Header,
+                inject_header: "x-api-key".to_string(),
+                credential_format: "{}".to_string(),
+                path_pattern: None,
+                path_replacement: None,
+                query_param_name: None,
+                proxy: None,
+                inject_overrides: vec![],
+                env_var: Some("ANTHROPIC_API_KEY".to_string()),
+                endpoint_rules: vec![],
+                tls_ca: None,
+                tls_client_cert: None,
+                tls_client_key: None,
+            }],
+            ..Default::default()
+        };
+
+        let vars = handle.credential_env_vars(&config);
+        assert!(vars
+            .iter()
+            .any(|(key, value)| key == "CLAUDE_CODE_OAUTH_TOKEN" && value == "test_token"));
+        assert!(vars.iter().all(|(key, _)| key != "ANTHROPIC_API_KEY"));
+    }
+
+    #[test]
     fn test_proxy_credential_env_vars_skips_unloaded_routes() {
         // When a credential is unavailable (e.g., GITHUB_TOKEN not set),
         // the route should NOT inject a phantom token env var. Otherwise
@@ -748,7 +796,7 @@ mod tests {
             audit_log: audit::new_audit_log(),
             shutdown_tx,
             // Only "openai" was loaded; "github" credential was unavailable
-            loaded_routes: ["openai".to_string()].into_iter().collect(),
+            loaded_env_vars: [("openai".to_string(), None)].into_iter().collect(),
             no_proxy_hosts: Vec::new(),
         };
         let config = ProxyConfig {
@@ -827,7 +875,7 @@ mod tests {
             token: Zeroizing::new("test_token".to_string()),
             audit_log: audit::new_audit_log(),
             shutdown_tx,
-            loaded_routes: std::collections::HashSet::new(),
+            loaded_env_vars: std::collections::HashMap::new(),
             no_proxy_hosts: Vec::new(),
         };
 
@@ -914,7 +962,7 @@ mod tests {
             token: Zeroizing::new("phantom".to_string()),
             audit_log: audit::new_audit_log(),
             shutdown_tx: shutdown_tx.clone(),
-            loaded_routes: ["anthropic".to_string()].into_iter().collect(),
+            loaded_env_vars: [("anthropic".to_string(), None)].into_iter().collect(),
             no_proxy_hosts: Vec::new(),
         };
         let config_no_env_var = ProxyConfig {
@@ -952,7 +1000,12 @@ mod tests {
             token: Zeroizing::new("phantom".to_string()),
             audit_log: audit::new_audit_log(),
             shutdown_tx: shutdown_tx2,
-            loaded_routes: ["anthropic".to_string()].into_iter().collect(),
+            loaded_env_vars: [(
+                "anthropic".to_string(),
+                Some("ANTHROPIC_API_KEY".to_string()),
+            )]
+            .into_iter()
+            .collect(),
             no_proxy_hosts: Vec::new(),
         };
         let config_fixed = ProxyConfig {
@@ -993,7 +1046,7 @@ mod tests {
             token: Zeroizing::new("test_token".to_string()),
             audit_log: audit::new_audit_log(),
             shutdown_tx,
-            loaded_routes: std::collections::HashSet::new(),
+            loaded_env_vars: std::collections::HashMap::new(),
             no_proxy_hosts: vec![
                 "nats.internal:4222".to_string(),
                 "opencode.internal:4096".to_string(),
@@ -1024,7 +1077,7 @@ mod tests {
             token: Zeroizing::new("test_token".to_string()),
             audit_log: audit::new_audit_log(),
             shutdown_tx,
-            loaded_routes: std::collections::HashSet::new(),
+            loaded_env_vars: std::collections::HashMap::new(),
             no_proxy_hosts: Vec::new(),
         };
 

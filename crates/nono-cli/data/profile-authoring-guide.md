@@ -156,7 +156,7 @@ Define a custom reverse proxy credential route for services not in `network-poli
 
 `proxy` overrides apply only to how the local proxy validates incoming phantom tokens from the sandboxed process. Outbound upstream credential injection continues to use top-level fields.
 
-`inject_overrides` selects `inject_header` and `credential_format` based on the credential value's prefix. The first matching entry wins; if none match, the route's top-level values are used. This is useful when a single credential env var may hold tokens of different shapes — for example, an Anthropic API key (`sk-ant-api...`) vs a Claude Code OAuth token (`sk-ant-oat...`):
+`inject_overrides` selects upstream injection settings and optional child-side phantom token settings based on the credential value's prefix. The first matching entry wins; if none match, the route's top-level values are used. This is useful when a single credential may hold tokens of different shapes — for example, an Anthropic API key (`sk-ant-api...`) vs a Claude Code OAuth token (`sk-ant-oat...`):
 
 ```json
 {
@@ -165,20 +165,28 @@ Define a custom reverse proxy credential route for services not in `network-poli
   "inject_header": "x-api-key",
   "credential_format": "{}",
   "inject_overrides": [
-    { "prefix": "sk-ant-oat", "inject_header": "Authorization", "credential_format": "Bearer {}" }
+    {
+      "prefix": "sk-ant-oat",
+      "inject_header": "Authorization",
+      "credential_format": "Bearer {}",
+      "env_var": "CLAUDE_CODE_OAUTH_TOKEN",
+      "proxy_inject_header": "Authorization"
+    }
   ]
 }
 ```
 
-A Claude Code OAuth token is injected as `Authorization: Bearer <token>`; a regular API key falls through to `x-api-key`.
+A Claude Code OAuth token is exposed to the child as a phantom `CLAUDE_CODE_OAUTH_TOKEN`, validated from the child's `Authorization` header, and injected upstream as `Authorization: Bearer <token>`. A regular API key falls through to `ANTHROPIC_API_KEY` / `x-api-key`.
 
 Each `inject_overrides` entry:
 
 | Field | Required | Default | Description |
 |---|---|---|---|
 | `prefix` | yes | — | Credential value prefix to match |
-| `inject_header` | yes | — | HTTP header to inject into when prefix matches |
+| `inject_header` | yes | — | Upstream HTTP header to inject into when prefix matches |
 | `credential_format` | no | `Bearer {}` | Format string; `{}` replaced with the credential |
+| `env_var` | no | route default | Child env var to set to the phantom token when prefix matches |
+| `proxy_inject_header` | no | route default | Child request header to validate the phantom token from when prefix matches |
 
 ### env_credentials (alias: secrets)
 

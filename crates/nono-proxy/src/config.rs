@@ -137,7 +137,13 @@ pub struct RouteConfig {
     ///
     /// ```json
     /// "inject_overrides": [
-    ///   { "prefix": "sk-ant-oat", "inject_header": "Authorization", "credential_format": "Bearer {}" }
+    ///   {
+    ///     "prefix": "sk-ant-oat",
+    ///     "inject_header": "Authorization",
+    ///     "credential_format": "Bearer {}",
+    ///     "env_var": "CLAUDE_CODE_OAUTH_TOKEN",
+    ///     "proxy_inject_header": "Authorization"
+    ///   }
     /// ]
     /// ```
     ///
@@ -194,7 +200,7 @@ pub struct RouteConfig {
 /// Evaluated at proxy startup inside [`crate::credential::CredentialStore::load`].
 /// The first matching entry in a route's `inject_overrides` list wins; if none
 /// match, the route's top-level `inject_header` and `credential_format` are used.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InjectOverride {
     /// Credential value prefix to match (e.g., `"sk-ant-oat"` for Claude Code OAuth tokens).
     pub prefix: String,
@@ -203,6 +209,17 @@ pub struct InjectOverride {
     /// Format string; `{}` is replaced with the credential value. Default: `"Bearer {}"`.
     #[serde(default = "default_credential_format")]
     pub credential_format: String,
+    /// Optional child env var for the phantom token when this override matches.
+    ///
+    /// For Claude Code OAuth tokens, `CLAUDE_CODE_OAUTH_TOKEN` makes the client
+    /// use its OAuth auth path instead of treating the phantom as an API key.
+    #[serde(default)]
+    pub env_var: Option<String>,
+    /// Optional proxy-side auth header used to validate the phantom token.
+    ///
+    /// Defaults to the route's proxy or top-level injection header when absent.
+    #[serde(default)]
+    pub proxy_inject_header: Option<String>,
 }
 
 /// Optional proxy-side overrides for credential injection shape.

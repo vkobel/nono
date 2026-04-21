@@ -176,7 +176,9 @@
         {
           "prefix": "sk-ant-oat",
           "inject_header": "Authorization",
-          "credential_format": "Bearer {}"
+          "credential_format": "Bearer {}",
+          "env_var": "CLAUDE_CODE_OAUTH_TOKEN",
+          "proxy_inject_header": "Authorization"
         }
       ]
     },

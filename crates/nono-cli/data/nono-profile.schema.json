@@ -465,14 +465,14 @@
         "inject_overrides": {
           "type": "array",
           "items": { "$ref": "#/$defs/InjectOverride" },
-          "description": "Prefix-based outbound injection overrides. The first entry whose prefix matches the start of the loaded credential value overrides inject_header and credential_format for upstream injection. Falls through to route defaults if no entry matches.",
+          "description": "Prefix-based injection overrides. The first entry whose prefix matches the start of the loaded credential value can override upstream inject_header/credential_format plus the child env var and proxy-side phantom-token header. Falls through to route defaults if no entry matches.",
           "default": []
         }
       }
     },
     "InjectOverride": {
       "type": "object",
-      "description": "Overrides inject_header and credential_format for upstream injection when the loaded credential value starts with the given prefix. Useful when a single credential env var may hold tokens of different shapes (e.g. Anthropic API keys vs Claude Code OAuth tokens).",
+      "description": "Overrides upstream injection, child phantom-token env var, and proxy-side phantom-token header when the loaded credential value starts with the given prefix. Useful when a single credential env var may hold tokens of different shapes (e.g. Anthropic API keys vs Claude Code OAuth tokens).",
       "additionalProperties": false,
       "required": ["prefix", "inject_header"],
       "properties": {
@@ -488,6 +488,14 @@
           "type": "string",
           "description": "Format string with {} placeholder used when the prefix matches. Default: \"Bearer {}\".",
           "default": "Bearer {}"
+        },
+        "env_var": {
+          "type": ["string", "null"],
+          "description": "Optional child environment variable to receive the proxy phantom token when the prefix matches (e.g. \"CLAUDE_CODE_OAUTH_TOKEN\")."
+        },
+        "proxy_inject_header": {
+          "type": ["string", "null"],
+          "description": "Optional proxy-side HTTP header to validate the phantom token from when the prefix matches (e.g. \"Authorization\")."
         }
       }
     },

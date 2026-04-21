@@ -119,6 +119,11 @@ pub struct CustomCredentialDef {
     #[serde(default = "default_credential_format")]
     pub credential_format: String,
 
+    /// Prefix-based upstream injection overrides for credentials whose value
+    /// shape determines the required upstream auth header.
+    #[serde(default)]
+    pub inject_overrides: Vec<nono_proxy::config::InjectOverride>,
+
     // --- URL path mode fields ---
     /// Pattern to match in incoming URL path. Use {} as placeholder for phantom token.
     /// Example: "/bot{}/" matches "/bot<token>/getMe"
@@ -337,6 +342,70 @@ fn validate_custom_credential(name: &str, cred: &CustomCredentialDef) -> Result<
     }
 
     validate_proxy_override(name, cred)?;
+    validate_inject_overrides(name, cred)?;
+
+    Ok(())
+}
+
+fn validate_inject_overrides(name: &str, cred: &CustomCredentialDef) -> Result<()> {
+    for override_ in &cred.inject_overrides {
+        if override_.prefix.is_empty() {
+            return Err(NonoError::ProfileParse(format!(
+                "inject_overrides.prefix for custom credential '{}' cannot be empty",
+                name
+            )));
+        }
+        if override_.prefix.contains('\r') || override_.prefix.contains('\n') {
+            return Err(NonoError::ProfileParse(format!(
+                "inject_overrides.prefix for custom credential '{}' contains invalid CRLF characters",
+                name
+            )));
+        }
+        if override_.inject_header.is_empty() {
+            return Err(NonoError::ProfileParse(format!(
+                "inject_overrides.inject_header for custom credential '{}' cannot be empty",
+                name
+            )));
+        }
+        if !override_.inject_header.chars().all(is_http_token_char) {
+            return Err(NonoError::ProfileParse(format!(
+                "inject_overrides.inject_header '{}' for custom credential '{}' contains invalid characters; \
+                 header names must be valid HTTP tokens (alphanumeric and !#$%&'*+-.^_`|~)",
+                override_.inject_header, name
+            )));
+        }
+        if override_.credential_format.contains('\r') || override_.credential_format.contains('\n')
+        {
+            return Err(NonoError::ProfileParse(format!(
+                "inject_overrides.credential_format for custom credential '{}' contains invalid CRLF characters; \
+                 this could enable header injection attacks",
+                name
+            )));
+        }
+        if let Some(env_var) = override_.env_var.as_ref() {
+            nono::validate_destination_env_var(env_var).map_err(|e| {
+                NonoError::ProfileParse(format!(
+                    "inject_overrides.env_var for custom credential '{}' is invalid: {}",
+                    name, e
+                ))
+            })?;
+        }
+        if let Some(header) = override_.proxy_inject_header.as_ref() {
+            if header.is_empty() {
+                return Err(NonoError::ProfileParse(format!(
+                    "inject_overrides.proxy_inject_header for custom credential '{}' cannot be empty",
+                    name
+                )));
+            }
+            if !header.chars().all(is_http_token_char) {
+                return Err(NonoError::ProfileParse(format!(
+                    "inject_overrides.proxy_inject_header '{}' for custom credential '{}' contains invalid characters; \
+                     header names must be valid HTTP tokens (alphanumeric and !#$%&'*+-.^_`|~)",
+                    header, name
+                )));
+            }
+        }
+    }
 
     Ok(())
 }
@@ -2309,6 +2378,7 @@ mod tests {
             inject_mode: InjectMode::Header,
             inject_header: "Authorization".to_string(),
             credential_format: "Bearer {}".to_string(),
+            inject_overrides: vec![],
             path_pattern: None,
             path_replacement: None,
             query_param_name: None,
@@ -2472,6 +2542,7 @@ mod tests {
             inject_mode: InjectMode::UrlPath,
             inject_header: "Authorization".to_string(),
             credential_format: "Bearer {}".to_string(),
+            inject_overrides: vec![],
             path_pattern: Some("/bot{}/".to_string()),
             path_replacement: None,
             query_param_name: None,
@@ -2493,6 +2564,7 @@ mod tests {
             inject_mode: InjectMode::UrlPath,
             inject_header: "Authorization".to_string(),
             credential_format: "Bearer {}".to_string(),
+            inject_overrides: vec![],
             path_pattern: None, // Missing required field
             path_replacement: None,
             query_param_name: None,
@@ -2516,6 +2588,7 @@ mod tests {
             inject_mode: InjectMode::UrlPath,
             inject_header: "Authorization".to_string(),
             credential_format: "Bearer {}".to_string(),
+            inject_overrides: vec![],
             path_pattern: Some("/bot/token/".to_string()), // No {} placeholder
             path_replacement: None,
             query_param_name: None,
@@ -2539,6 +2612,7 @@ mod tests {
             inject_mode: InjectMode::UrlPath,
             inject_header: "Authorization".to_string(),
             credential_format: "Bearer {}".to_string(),
+            inject_overrides: vec![],
             path_pattern: Some("/bot{}/".to_string()),
             path_replacement: Some("/v2/bot{}/".to_string()),
             query_param_name: None,
@@ -2560,6 +2634,7 @@ mod tests {
             inject_mode: InjectMode::UrlPath,
             inject_header: "Authorization".to_string(),
             credential_format: "Bearer {}".to_string(),
+            inject_overrides: vec![],
             path_pattern: Some("/bot{}/".to_string()),
             path_replacement: Some("/v2/bot/fixed/".to_string()), // No {} placeholder
             query_param_name: None,
@@ -2583,6 +2658,7 @@ mod tests {
             inject_mode: InjectMode::QueryParam,
             inject_header: "Authorization".to_string(),
             credential_format: "Bearer {}".to_string(),
+            inject_overrides: vec![],
             path_pattern: None,
             path_replacement: None,
             query_param_name: Some("key".to_string()),
@@ -2604,6 +2680,7 @@ mod tests {
             inject_mode: InjectMode::QueryParam,
             inject_header: "Authorization".to_string(),
             credential_format: "Bearer {}".to_string(),
+            inject_overrides: vec![],
             path_pattern: None,
             path_replacement: None,
             query_param_name: None, // Missing required field
@@ -2627,6 +2704,7 @@ mod tests {
             inject_mode: InjectMode::QueryParam,
             inject_header: "Authorization".to_string(),
             credential_format: "Bearer {}".to_string(),
+            inject_overrides: vec![],
             path_pattern: None,
             path_replacement: None,
             query_param_name: Some("".to_string()), // Empty
@@ -2650,6 +2728,7 @@ mod tests {
             inject_mode: InjectMode::BasicAuth,
             inject_header: "Authorization".to_string(),
             credential_format: "Bearer {}".to_string(),
+            inject_overrides: vec![],
             path_pattern: None,
             path_replacement: None,
             query_param_name: None,
@@ -2714,6 +2793,36 @@ mod tests {
         });
 
         assert!(validate_custom_credential("test", &cred).is_ok());
+    }
+
+    #[test]
+    fn test_validate_inject_override_valid() {
+        let mut cred = header_cred_builder();
+        cred.inject_overrides = vec![nono_proxy::config::InjectOverride {
+            prefix: "sk-ant-oat".to_string(),
+            inject_header: "Authorization".to_string(),
+            credential_format: "Bearer {}".to_string(),
+            env_var: Some("CLAUDE_CODE_OAUTH_TOKEN".to_string()),
+            proxy_inject_header: Some("Authorization".to_string()),
+        }];
+
+        assert!(validate_custom_credential("test", &cred).is_ok());
+    }
+
+    #[test]
+    fn test_validate_inject_override_rejects_invalid_header() {
+        let mut cred = header_cred_builder();
+        cred.inject_overrides = vec![nono_proxy::config::InjectOverride {
+            prefix: "sk-ant-oat".to_string(),
+            inject_header: "Bad Header".to_string(),
+            credential_format: "Bearer {}".to_string(),
+            env_var: None,
+            proxy_inject_header: None,
+        }];
+
+        let result = validate_custom_credential("test", &cred);
+        let err = result.expect_err("inject override header should be rejected");
+        assert!(err.to_string().contains("inject_overrides.inject_header"));
     }
 
     // ============================================================================
@@ -3029,6 +3138,7 @@ mod tests {
                 inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
                 credential_format: "Bearer {}".to_string(),
+                inject_overrides: vec![],
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
@@ -3050,6 +3160,7 @@ mod tests {
                 inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
                 credential_format: "Token {}".to_string(),
+                inject_overrides: vec![],
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
@@ -3189,6 +3300,7 @@ mod tests {
                 inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
                 credential_format: "Bearer {}".to_string(),
+                inject_overrides: vec![],
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
@@ -3210,6 +3322,7 @@ mod tests {
                 inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
                 credential_format: "Token {}".to_string(),
+                inject_overrides: vec![],
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
@@ -4418,6 +4531,7 @@ mod tests {
             inject_mode: InjectMode::Header,
             inject_header: "Authorization".to_string(),
             credential_format: "Bearer {}".to_string(),
+            inject_overrides: vec![],
             path_pattern: None,
             path_replacement: None,
             query_param_name: None,
@@ -4442,6 +4556,7 @@ mod tests {
             inject_mode: InjectMode::Header,
             inject_header: "Authorization".to_string(),
             credential_format: "Bearer {}".to_string(),
+            inject_overrides: vec![],
             path_pattern: None,
             path_replacement: None,
             query_param_name: None,
@@ -4469,6 +4584,7 @@ mod tests {
             inject_mode: InjectMode::Header,
             inject_header: "Authorization".to_string(),
             credential_format: "Bearer {}".to_string(),
+            inject_overrides: vec![],
             path_pattern: None,
             path_replacement: None,
             query_param_name: None,
@@ -4496,6 +4612,7 @@ mod tests {
             inject_mode: InjectMode::Header,
             inject_header: "Authorization".to_string(),
             credential_format: "Bearer {}".to_string(),
+            inject_overrides: vec![],
             path_pattern: None,
             path_replacement: None,
             query_param_name: None,

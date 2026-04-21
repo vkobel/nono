@@ -5,7 +5,7 @@
 
 use crate::profile::CustomCredentialDef;
 use nono::{NonoError, Result};
-use nono_proxy::config::{EndpointRule, InjectMode, ProxyConfig, RouteConfig};
+use nono_proxy::config::{EndpointRule, InjectMode, InjectOverride, ProxyConfig, RouteConfig};
 use serde::Deserialize;
 use std::collections::HashMap;
 use tracing::debug;
@@ -69,6 +69,9 @@ pub struct CredentialDef {
     pub inject_header: String,
     #[serde(default = "default_credential_format")]
     pub credential_format: String,
+    /// Prefix-based upstream injection overrides.
+    #[serde(default)]
+    pub inject_overrides: Vec<InjectOverride>,
     /// Explicit environment variable name for the phantom token.
     ///
     /// Required when `credential_key` is a URI manager reference (`env://`,
@@ -233,6 +236,7 @@ pub fn resolve_credentials(
                 path_replacement: cred.path_replacement.clone(),
                 query_param_name: cred.query_param_name.clone(),
                 proxy: cred.proxy.clone(),
+                inject_overrides: cred.inject_overrides.clone(),
                 env_var: cred.env_var.clone(),
                 endpoint_rules: cred.endpoint_rules.clone(),
                 tls_ca: cred
@@ -281,6 +285,7 @@ pub fn resolve_credentials(
                 path_replacement: None,
                 query_param_name: None,
                 proxy: None,
+                inject_overrides: cred.inject_overrides.clone(),
                 env_var: cred.env_var.clone(),
                 endpoint_rules: cred.endpoint_rules.clone(),
                 tls_ca: None, // Built-in credentials don't support custom CAs
@@ -467,6 +472,7 @@ mod tests {
                 inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
                 credential_format: "Bearer {}".to_string(),
+                inject_overrides: vec![],
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
@@ -506,6 +512,7 @@ mod tests {
                 inject_mode: InjectMode::Header,
                 inject_header: "X-Custom-Auth".to_string(),
                 credential_format: "Token {}".to_string(),
+                inject_overrides: vec![],
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
@@ -541,6 +548,7 @@ mod tests {
                 inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
                 credential_format: "Bearer {}".to_string(),
+                inject_overrides: vec![],
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
@@ -586,6 +594,7 @@ mod tests {
                 inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
                 credential_format: "Bearer {}".to_string(),
+                inject_overrides: vec![],
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
@@ -667,6 +676,7 @@ mod tests {
                 inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
                 credential_format: "Bearer {}".to_string(),
+                inject_overrides: vec![],
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
@@ -699,6 +709,7 @@ mod tests {
                 inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
                 credential_format: "Bearer {}".to_string(),
+                inject_overrides: vec![],
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
@@ -731,6 +742,7 @@ mod tests {
                 inject_mode: InjectMode::Header,
                 inject_header: "X-Custom-Auth".to_string(),
                 credential_format: "Token {}".to_string(),
+                inject_overrides: vec![],
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
@@ -768,6 +780,7 @@ mod tests {
                 inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
                 credential_format: "Bearer {}".to_string(),
+                inject_overrides: vec![],
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
@@ -833,6 +846,33 @@ mod tests {
     }
 
     #[test]
+    fn test_resolve_anthropic_credential_preserves_oauth_inject_override() {
+        let json = embedded_network_policy_json();
+        let policy = load_network_policy(json).expect("policy should load");
+
+        let custom = HashMap::new();
+        let routes = resolve_credentials(&policy, &["anthropic".to_string()], &custom)
+            .expect("should resolve");
+        assert_eq!(routes.len(), 1);
+
+        let anthropic = &routes[0];
+        assert_eq!(anthropic.prefix, "anthropic");
+        assert_eq!(anthropic.inject_header, "x-api-key");
+        assert_eq!(anthropic.inject_overrides.len(), 1);
+        assert_eq!(anthropic.inject_overrides[0].prefix, "sk-ant-oat");
+        assert_eq!(anthropic.inject_overrides[0].inject_header, "Authorization");
+        assert_eq!(anthropic.inject_overrides[0].credential_format, "Bearer {}");
+        assert_eq!(
+            anthropic.inject_overrides[0].env_var,
+            Some("CLAUDE_CODE_OAUTH_TOKEN".to_string())
+        );
+        assert_eq!(
+            anthropic.inject_overrides[0].proxy_inject_header,
+            Some("Authorization".to_string())
+        );
+    }
+
+    #[test]
     fn test_claude_code_profile_includes_github_credential() {
         let json = embedded_network_policy_json();
         let policy = load_network_policy(json).expect("policy should load");
@@ -879,6 +919,7 @@ mod tests {
                 inject_mode: InjectMode::Header,
                 inject_header: "Authorization".to_string(),
                 credential_format: "Bearer {}".to_string(),
+                inject_overrides: vec![],
                 path_pattern: None,
                 path_replacement: None,
                 query_param_name: None,
