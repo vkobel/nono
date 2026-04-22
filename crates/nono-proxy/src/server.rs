@@ -148,6 +148,15 @@ impl ProxyHandle {
             // fall back to uppercasing the credential_key (e.g., "openai_api_key" -> "OPENAI_API_KEY").
             if let Some(env_var) = loaded_env_var {
                 vars.push((env_var.clone(), self.token.to_string()));
+                // Also shadow the route's original env_var. When an inject_override
+                // maps to a different env var name (e.g. ANTHROPIC_API_KEY →
+                // CLAUDE_CODE_OAUTH_TOKEN), the original name is still present in
+                // the parent env and would be inherited by the child unchanged.
+                if let Some(ref route_env_var) = route.env_var {
+                    if route_env_var != env_var {
+                        vars.push((route_env_var.clone(), self.token.to_string()));
+                    }
+                }
             } else if let Some(ref env_var) = route.env_var {
                 vars.push((env_var.clone(), self.token.to_string()));
             } else if let Some(ref cred_key) = route.credential_key {
@@ -785,7 +794,12 @@ mod tests {
         assert!(vars
             .iter()
             .any(|(key, value)| key == "CLAUDE_CODE_OAUTH_TOKEN" && value == "test_token"));
-        assert!(vars.iter().all(|(key, _)| key != "ANTHROPIC_API_KEY"));
+        // The route's original env_var must also be shadowed so the real credential
+        // from the parent env doesn't leak into the child when the override uses a
+        // different name.
+        assert!(vars
+            .iter()
+            .any(|(key, value)| key == "ANTHROPIC_API_KEY" && value == "test_token"));
     }
 
     #[test]
